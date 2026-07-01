@@ -49,14 +49,27 @@ app.listen(config.port, () => {
 // Telegram-бот (long polling)
 const bot = createBot();
 if (bot) {
-  bot.start({
-    onStart: async () => {
-      console.log('🤖 Telegram-бот запущен (long polling)');
-      await setupMenuButton(bot);
-    },
-  });
+  bot
+    .start({
+      onStart: async () => {
+        console.log('🤖 Telegram-бот запущен (long polling)');
+        await setupMenuButton(bot);
+      },
+    })
+    .catch((err) => {
+      // Не роняем веб-сервер, если бот не смог запуститься (напр. неверный BOT_TOKEN)
+      const desc = (err && (err.description || err.message)) || err;
+      console.error('❌ Не удалось запустить Telegram-бота. Проверьте BOT_TOKEN у @BotFather.');
+      console.error('   Причина:', desc);
+      console.error('   Веб-приложение (Mini App) продолжает работать.');
+    });
 
-  const stop = () => bot.stop();
+  const stop = () => { try { bot.stop(); } catch (e) {} };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
 }
+
+// Подстраховка: не позволяем необработанным промисам ронять процесс
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ Необработанная ошибка промиса:', reason);
+});
