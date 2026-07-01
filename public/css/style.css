@@ -109,32 +109,55 @@ input, textarea, select { font-family: inherit; font-size: 16px; color: inherit;
   overflow-y: auto;
 }
 
-/* ===== Frosted tab bar ===== */
+/* ===== Frosted tab bar with sliding indicator ===== */
 #tabbar {
+  --i: 0;
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
   height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
   padding-bottom: env(safe-area-inset-bottom);
   display: flex;
   background: var(--topbar-bg);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+  backdrop-filter: saturate(180%) blur(24px);
   border-top: 0.5px solid var(--sep);
 }
-.tab {
-  position: relative; flex: 1; border: none; background: none;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-  color: var(--hint); font-size: 10.5px; font-weight: 550; padding: 6px 0;
-  transition: color .15s ease;
+/* Скользящая капсула под активным разделом */
+.tab-indicator {
+  position: absolute; z-index: 0; top: 8px;
+  width: 58px; height: 44px; border-radius: 15px;
+  left: calc(var(--i) * 20% + 10% - 29px);
+  background: var(--green-soft);
+  transition: left .5s cubic-bezier(.34, 1.42, .5, 1), background .3s ease;
+  pointer-events: none;
 }
-.tab-ic { font-size: 23px; transition: transform .15s ease; }
+.tab {
+  position: relative; z-index: 1; flex: 1; border: none; background: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  color: var(--hint); font-size: 10.5px; font-weight: 600; padding: 6px 0;
+  transition: color .3s ease;
+}
+.tab-lb { letter-spacing: -0.01em; transition: transform .4s cubic-bezier(.34, 1.56, .64, 1); }
+.tab-ic { font-size: 23px; transition: transform .4s cubic-bezier(.34, 1.56, .64, 1); }
+.tab:active .tab-ic { transform: scale(0.8); }
 .tab.active { color: var(--green); }
-.tab.active .tab-ic { transform: translateY(-1px); }
+.tab.active .tab-ic { animation: tab-pop .55s cubic-bezier(.34, 1.56, .64, 1); }
+.tab.active .tab-lb { transform: scale(1.04); }
+@keyframes tab-pop {
+  0%   { transform: scale(0.7); }
+  40%  { transform: scale(1.28); }
+  68%  { transform: scale(0.92); }
+  100% { transform: scale(1); }
+}
 .tab-badge {
-  position: absolute; top: 3px; left: 54%;
+  position: absolute; top: 3px; left: 54%; z-index: 2;
   min-width: 18px; height: 18px; padding: 0 5px;
   background: var(--red); color: #fff; border-radius: 9px;
   font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
   box-shadow: 0 0 0 2px var(--bg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-indicator, .tab-ic, .tab-lb { transition: none; }
+  .tab.active .tab-ic { animation: none; }
 }
 
 /* ===== Search field ===== */

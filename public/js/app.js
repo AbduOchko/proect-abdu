@@ -167,6 +167,7 @@ function confirmDialog(message) {
 }
 
 /* ================= router ================= */
+const TAB_ORDER = ['catalog', 'exchange', 'chats', 'deals', 'profile'];
 document.querySelectorAll('.tab').forEach((btn) => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
 function switchTab(tab) {
   state.tab = tab;
@@ -176,6 +177,10 @@ function switchTab(tab) {
     const i = b.querySelector('.tab-ic');
     if (i) i.className = `bi bi-${b.dataset.icon}${on ? '-fill' : ''} tab-ic`;
   });
+  // сдвигаем скользящую капсулу-индикатор под активный раздел
+  const idx = TAB_ORDER.indexOf(tab);
+  const bar = document.getElementById('tabbar');
+  if (idx >= 0 && bar) bar.style.setProperty('--i', idx);
   haptic('light');
   renderTab();
 }
