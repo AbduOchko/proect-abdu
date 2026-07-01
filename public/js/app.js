@@ -82,6 +82,8 @@ const state = {
 let chatOpen = false;
 let chatCtx = null;
 let productPageOpen = false;
+let listPageOpen = false;
+let listPageKind = null;
 
 /* ================= helpers ================= */
 function esc(s) {
@@ -202,7 +204,7 @@ overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSheet(
 
 function updateBackButton() {
   if (!tg || !tg.BackButton) return;
-  if (chatOpen || productPageOpen || !overlay.hidden) tg.BackButton.show(); else tg.BackButton.hide();
+  if (chatOpen || productPageOpen || listPageOpen || !overlay.hidden) tg.BackButton.show(); else tg.BackButton.hide();
 }
 if (tg && tg.BackButton) {
   tg.BackButton.onClick(() => {
@@ -211,7 +213,41 @@ if (tg && tg.BackButton) {
     if (chatOpen) closeChat();
     else if (productPageOpen) closeProductPage();
     else if (!overlay.hidden) closeSheet();
+    else if (listPageOpen) closeListPage();
   });
+}
+
+// Универсальная полноэкранная страница-список (для «Мои товары», «Мои объявления»)
+function ensureListPage(title) {
+  let el = document.getElementById('list-page');
+  if (!el) { el = document.createElement('div'); el.id = 'list-page'; document.body.appendChild(el); }
+  el.innerHTML = `
+    <div class="pp-head">
+      <button class="back" id="lp-back">${ic('chevron-left')}</button>
+      <div class="pp-htitle">${esc(title)}</div>
+      <div style="width:34px"></div>
+    </div>
+    <div class="pp-scroll" id="lp-scroll"><div class="loader"><span class="spin"></span></div></div>`;
+  el.style.display = 'flex';
+  listPageOpen = true;
+  document.body.style.overflow = 'hidden';
+  document.getElementById('lp-back').addEventListener('click', closeListPage);
+  updateBackButton();
+  return document.getElementById('lp-scroll');
+}
+function closeListPage() {
+  listPageOpen = false;
+  listPageKind = null;
+  const el = document.getElementById('list-page');
+  if (el) el.style.display = 'none';
+  document.body.style.overflow = overlay.hidden ? '' : 'hidden';
+  updateBackButton();
+}
+// Обновить открытую страницу-список после изменений
+function refreshListPage() {
+  if (!listPageOpen) return;
+  if (listPageKind === 'products') openMyProducts();
+  else if (listPageKind === 'requests') openMyRequests();
 }
 
 function confirmDialog(message) {
@@ -434,9 +470,10 @@ function closeProductPage() {
   productPageOpen = false;
   const el = document.getElementById('product-page');
   if (el) el.style.display = 'none';
-  document.body.style.overflow = overlay.hidden ? '' : 'hidden';
+  document.body.style.overflow = (!overlay.hidden || listPageOpen) ? 'hidden' : '';
   updateBackButton();
   if (state.tab === 'catalog') loadCatalogList();
+  refreshListPage();
 }
 
 function renderProductPage(p) {
@@ -674,9 +711,9 @@ function openProductForm(edit) {
     try {
       if (isEdit) await API.put('/products/' + edit.id, body);
       else await API.post('/products', body);
-      haptic('success'); toast(isEdit ? 'Изменения сохранены' : 'Товар опубликован');
+      haptic('success'); closeSheet(); toast(isEdit ? 'Изменения сохранены' : 'Товар опубликован');
       if (state.tab === 'catalog') loadCatalogList();
-      openMyProducts();
+      refreshListPage();
     } catch (e) { toast(e.message); }
   });
 }
@@ -752,7 +789,7 @@ async function openRequestDetail(id) {
     sheetBody.querySelector('[data-act="offer"]')?.addEventListener('click', () => startChat(r.buyer_id, 0));
     sheetBody.querySelector('[data-act="close"]')?.addEventListener('click', async () => {
       await API.patch(`/requests/${r.id}/status`, { status: 'closed' });
-      toast('Заявка закрыта'); closeSheet(); loadExchangeList();
+      toast('Заявка закрыта'); closeSheet(); loadExchangeList(); refreshListPage();
     });
   } catch (e) { openSheet(emptyState('exclamation-triangle', e.message)); }
 }
@@ -778,6 +815,7 @@ function openRequestForm() {
       await API.post('/requests', body);
       haptic('success'); closeSheet(); toast('Заявка размещена');
       if (state.tab === 'exchange') loadExchangeList();
+      refreshListPage();
     } catch (e) { toast(e.message); }
   });
 }
@@ -1028,10 +1066,10 @@ async function renderProfile() {
       <div class="field mt8"><textarea id="pf-bio" maxlength="500" placeholder="Расскажите о себе">${esc(me.bio || '')}</textarea></div>
       <button class="btn secondary sm" id="pf-save-bio">${ic('check-lg')} Сохранить</button>
 
-      <div class="section-label">Мои объявления</div>
+      <div class="section-label">Мои публикации</div>
       <div class="list-group">
         <button class="ios-row" id="pf-products"><span class="ios-ic">${ic('bag')}</span><span class="label">Мои товары</span><span class="chev">${ic('chevron-right')}</span></button>
-        <button class="ios-row" id="pf-requests"><span class="ios-ic">${ic('megaphone')}</span><span class="label">Мои заявки</span><span class="chev">${ic('chevron-right')}</span></button>
+        <button class="ios-row" id="pf-requests"><span class="ios-ic">${ic('megaphone')}</span><span class="label">Мои объявления</span><span class="chev">${ic('chevron-right')}</span></button>
       </div>
 
       <div class="section-label">Информация</div>
@@ -1063,38 +1101,73 @@ function myProductCard(p, i) {
 }
 
 async function openMyProducts() {
-  openSheet('<div class="loader"><span class="spin"></span></div>');
+  const scroll = ensureListPage('Мои товары');
+  listPageKind = 'products';
   try {
     const items = await API.get('/products/mine');
-    openSheet(`
-      <div class="sheet-title">Мои товары</div>
+    scroll.innerHTML = `
       <button class="btn mb12" id="mp-add">${ic('plus-lg')} Добавить товар</button>
-      ${items.length ? items.map((p, i) => myProductCard(p, i)).join('') : emptyState('bag', 'У вас пока нет товаров.\nНажмите «Добавить товар».')}`);
+      ${items.length ? items.map((p, i) => myProductCard(p, i)).join('') : emptyState('bag', 'У вас пока нет товаров.\nНажмите «Добавить товар».')}`;
     const byId = (id) => items.find((x) => x.id === Number(id));
     document.getElementById('mp-add').addEventListener('click', () => openProductForm());
-    sheetBody.querySelectorAll('.pcard').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
-    sheetBody.querySelectorAll('[data-edit]').forEach((b) =>
+    scroll.querySelectorAll('.pcard').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
+    scroll.querySelectorAll('[data-edit]').forEach((b) =>
       b.addEventListener('click', () => openProductForm(byId(b.dataset.edit))));
-    sheetBody.querySelectorAll('[data-toggle]').forEach((b) =>
+    scroll.querySelectorAll('[data-toggle]').forEach((b) =>
       b.addEventListener('click', async () => {
         const p = byId(b.dataset.toggle);
         await API.patch(`/products/${p.id}/status`, { status: p.status === 'active' ? 'hidden' : 'active' });
         haptic('light'); toast('Готово'); openMyProducts();
       }));
-    sheetBody.querySelectorAll('[data-del]').forEach((b) =>
+    scroll.querySelectorAll('[data-del]').forEach((b) =>
       b.addEventListener('click', async () => {
         if (!(await confirmDialog('Удалить товар?'))) return;
         await API.del('/products/' + b.dataset.del); haptic('success'); toast('Удалено'); openMyProducts();
       }));
-  } catch (e) { openSheet(emptyState('exclamation-triangle', e.message)); }
+  } catch (e) { scroll.innerHTML = emptyState('exclamation-triangle', e.message); }
 }
+
+function myRequestCard(r) {
+  const c = catByKey(r.category);
+  const closed = r.status !== 'active';
+  return `<div class="mp-item">
+    <div class="card" data-id="${r.id}">
+      <div class="card-top">
+        <div style="min-width:0"><div class="card-title">${esc(r.title)}</div>
+        <span class="badge cat">${ic(c.icon)} ${esc(c.title)}</span>
+        ${closed ? '<span class="st st-closed">Закрыта</span>' : ''}</div>
+        <div class="price">${money(r.budget, 'Бюджет —')}</div>
+      </div>
+      ${r.description ? `<div class="card-desc">${esc(r.description)}</div>` : ''}
+    </div>
+    <div class="mp-actions">
+      ${closed ? '' : `<button class="mp-btn" data-close="${r.id}">${ic('check-circle')} Закрыть</button>`}
+      <button class="mp-btn danger" data-delr="${r.id}">${ic('trash')} Удалить</button>
+    </div>
+  </div>`;
+}
+
 async function openMyRequests() {
-  openSheet('<div class="loader"><span class="spin"></span></div>');
+  const scroll = ensureListPage('Мои объявления');
+  listPageKind = 'requests';
   try {
     const items = await API.get('/requests/mine');
-    openSheet(`<div class="sheet-title">Мои заявки</div>${items.length ? items.map(requestCard).join('') : emptyState('megaphone', 'У вас нет заявок')}`);
-    sheetBody.querySelectorAll('.card').forEach((c) => c.addEventListener('click', () => openRequestDetail(Number(c.dataset.id))));
-  } catch (e) { openSheet(emptyState('exclamation-triangle', e.message)); }
+    scroll.innerHTML = `
+      <button class="btn mb12" id="mr-add">${ic('plus-lg')} Добавить объявление</button>
+      ${items.length ? items.map(myRequestCard).join('') : emptyState('megaphone', 'У вас пока нет объявлений.\nНажмите «Добавить объявление».')}`;
+    document.getElementById('mr-add').addEventListener('click', openRequestForm);
+    scroll.querySelectorAll('.card').forEach((c) => c.addEventListener('click', () => openRequestDetail(Number(c.dataset.id))));
+    scroll.querySelectorAll('[data-close]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        await API.patch(`/requests/${b.dataset.close}/status`, { status: 'closed' });
+        haptic('light'); toast('Закрыто'); openMyRequests();
+      }));
+    scroll.querySelectorAll('[data-delr]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        if (!(await confirmDialog('Удалить объявление?'))) return;
+        await API.del('/requests/' + b.dataset.delr); haptic('success'); toast('Удалено'); openMyRequests();
+      }));
+  } catch (e) { scroll.innerHTML = emptyState('exclamation-triangle', e.message); }
 }
 
 /* ================= misc ================= */

@@ -454,6 +454,12 @@ input, textarea, select { font-family: inherit; font-size: 16px; color: inherit;
   animation: pp-in .3s cubic-bezier(.22, .9, .3, 1);
 }
 @keyframes pp-in { from { transform: translateX(40px); opacity: 0; } }
+#list-page {
+  position: fixed; inset: 0; z-index: 44; background: var(--bg);
+  display: flex; flex-direction: column;
+  animation: pp-in .3s cubic-bezier(.22, .9, .3, 1);
+}
+#list-page .pp-scroll { padding-top: 14px; }
 .pp-head {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
   padding-top: calc(env(safe-area-inset-top) + 8px);
@@ -528,8 +534,10 @@ input, textarea, select { font-family: inherit; font-size: 16px; color: inherit;
 .avatar-upload-actions { display: flex; flex-direction: column; gap: 7px; align-items: flex-start; }
 .btn-link { background: none; border: none; color: var(--red); font-size: 13.5px; font-weight: 600; padding: 2px 0; }
 
-/* ===== Мои товары: управление ===== */
+/* ===== Мои товары / объявления: управление ===== */
 .mp-item { margin-bottom: 14px; }
+.mp-item .card { margin-bottom: 0; }
+.mp-item .card .st { margin-left: 6px; }
 .mp-actions { display: flex; gap: 8px; margin-top: 8px; }
 .mp-btn { flex: 1; border: none; background: var(--fill); color: var(--text); border-radius: 10px; padding: 9px 6px; font-size: 12.5px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 5px; transition: transform .1s ease; }
 .mp-btn.danger { background: var(--red-soft); color: var(--red); }
@@ -538,7 +546,7 @@ input, textarea, select { font-family: inherit; font-size: 16px; color: inherit;
 
 @media (prefers-reduced-motion: reduce) {
   .pcard { animation: none; }
-  #product-page { animation: none; }
+  #product-page, #list-page { animation: none; }
   .pcard.skeleton .pcard-av, .skel { animation: none; }
 }
 
