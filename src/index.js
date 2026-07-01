@@ -6,12 +6,18 @@ import { config } from './config.js';
 import { api } from './api.js';
 import { createBot, setupMenuButton } from './bot.js';
 import './db.js'; // инициализация схемы БД
+import { seedDemo } from './seed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '..', 'public');
 
 // Папка для загруженных скриншотов
 fs.mkdirSync(config.uploadsDir, { recursive: true });
+
+// Демо-данные (только если задано SEED_DEMO=1 и БД пустая)
+if (process.env.SEED_DEMO === '1') {
+  try { seedDemo(); } catch (e) { console.error('Ошибка сидирования:', e); }
+}
 
 const app = express();
 app.use(express.json({ limit: '8mb' })); // с запасом под base64-изображения
