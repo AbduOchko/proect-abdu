@@ -528,6 +528,14 @@ input, textarea, select { font-family: inherit; font-size: 16px; color: inherit;
 .avatar-upload-actions { display: flex; flex-direction: column; gap: 7px; align-items: flex-start; }
 .btn-link { background: none; border: none; color: var(--red); font-size: 13.5px; font-weight: 600; padding: 2px 0; }
 
+/* ===== Мои товары: управление ===== */
+.mp-item { margin-bottom: 14px; }
+.mp-actions { display: flex; gap: 8px; margin-top: 8px; }
+.mp-btn { flex: 1; border: none; background: var(--fill); color: var(--text); border-radius: 10px; padding: 9px 6px; font-size: 12.5px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 5px; transition: transform .1s ease; }
+.mp-btn.danger { background: var(--red-soft); color: var(--red); }
+.mp-btn .bi { font-size: 13px; }
+.mp-btn:active { transform: scale(0.97); }
+
 @media (prefers-reduced-motion: reduce) {
   .pcard { animation: none; }
   #product-page { animation: none; }

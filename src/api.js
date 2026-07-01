@@ -77,31 +77,44 @@ api.get('/products/:id', (req, res) => {
   res.json(p);
 });
 
+// Разбор и валидация полей товара (общая для создания и редактирования)
+function parseProductBody(body) {
+  const category = str(body.category, 20);
+  const title = str(body.title, 120);
+  const description = str(body.description, 4000);
+  const price = num(body.price);
+  if (!validCat(category)) return { error: 'Некорректная категория' };
+  if (title.length < 3) return { error: 'Слишком короткое название' };
+  if (price < 0) return { error: 'Цена не может быть отрицательной' };
+  const isChannel = category === 'channel'; // доп. поля храним только для каналов
+  const genres = isChannel && Array.isArray(body.genres)
+    ? body.genres.map((g) => str(g, 30)).filter(Boolean).slice(0, 12) : [];
+  const screenshots = isChannel && Array.isArray(body.screenshots)
+    ? body.screenshots.filter((u) => typeof u === 'string' && u.startsWith('/uploads/')).slice(0, 8) : [];
+  const avatar = typeof body.avatar === 'string' && body.avatar.startsWith('/uploads/') ? body.avatar : '';
+  return { fields: {
+    category, title, description, price, genres,
+    subscribers: isChannel ? Math.max(0, num(body.subscribers)) : 0,
+    reach24: isChannel ? Math.max(0, num(body.reach24)) : 0,
+    avg_age: isChannel ? str(body.avg_age, 40) : '',
+    screenshots, avatar,
+  } };
+}
+
 api.post('/products', (req, res) => {
-  const category = str(req.body.category, 20);
-  const title = str(req.body.title, 120);
-  const description = str(req.body.description, 4000);
-  const price = num(req.body.price);
-  if (!validCat(category)) return bad(res, 'Некорректная категория');
-  if (title.length < 3) return bad(res, 'Слишком короткое название');
-  if (price < 0) return bad(res, 'Цена не может быть отрицательной');
-  // Доп. поля храним только для каналов
-  const isChannel = category === 'channel';
-  const genres = isChannel && Array.isArray(req.body.genres)
-    ? req.body.genres.map((g) => str(g, 30)).filter(Boolean).slice(0, 12) : [];
-  const screenshots = isChannel && Array.isArray(req.body.screenshots)
-    ? req.body.screenshots.filter((u) => typeof u === 'string' && u.startsWith('/uploads/')).slice(0, 8) : [];
-  const avatar = typeof req.body.avatar === 'string' && req.body.avatar.startsWith('/uploads/') ? req.body.avatar : '';
-  const p = db.createProduct({
-    seller_id: req.user.id, category, title, description, price,
-    genres,
-    subscribers: isChannel ? Math.max(0, num(req.body.subscribers)) : 0,
-    reach24: isChannel ? Math.max(0, num(req.body.reach24)) : 0,
-    avg_age: isChannel ? str(req.body.avg_age, 40) : '',
-    screenshots,
-    avatar,
-  });
-  res.status(201).json(p);
+  const r = parseProductBody(req.body);
+  if (r.error) return bad(res, r.error);
+  res.status(201).json(db.createProduct({ seller_id: req.user.id, ...r.fields }));
+});
+
+// Редактирование товара (только владелец)
+api.put('/products/:id', (req, res) => {
+  const p = db.getProduct(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not_found' });
+  if (p.seller_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+  const r = parseProductBody(req.body);
+  if (r.error) return bad(res, r.error);
+  res.json(db.updateProduct(p.id, r.fields));
 });
 
 // Загрузка изображения (data URL -> файл в /uploads)

@@ -180,6 +180,7 @@ const API = {
   },
   get(p) { return this.call('GET', p); },
   post(p, b) { return this.call('POST', p, b); },
+  put(p, b) { return this.call('PUT', p, b); },
   patch(p, b) { return this.call('PATCH', p, b); },
   del(p) { return this.call('DELETE', p); },
 };
@@ -276,7 +277,6 @@ function plural(n, one, few, many) {
 
 async function renderCatalog() {
   topTitle.textContent = 'Каталог';
-  setAddButton(openProductForm);
   const s = state.catalog;
   const hasPrice = s.minPrice !== '' || s.maxPrice !== '';
   viewEl.innerHTML = `
@@ -553,13 +553,17 @@ async function buyProduct(p) {
   } catch (e) { toast(e.message); haptic('error'); }
 }
 
-function openProductForm() {
-  const genresSel = new Set();
-  const shots = [];
-  let avatarUrl = '';
+function openProductForm(edit) {
+  const isEdit = !!edit;
+  const genresSel = new Set(isEdit && Array.isArray(edit.genres) ? edit.genres : []);
+  const shots = isEdit && Array.isArray(edit.screenshots) ? [...edit.screenshots] : [];
+  let avatarUrl = isEdit ? (edit.avatar || '') : '';
+  const initSubs = isEdit && edit.subscribers ? edit.subscribers : '';
+  const initReach = isEdit && edit.reach24 ? edit.reach24 : '';
+  const initAge = isEdit ? (edit.avg_age || '') : '';
   openSheet(`
-    <div class="sheet-title">Новый товар</div>
-    <div class="field"><label>Категория</label><select id="f-cat">${CATEGORIES.map((c) => `<option value="${c.key}">${c.title}</option>`).join('')}</select></div>
+    <div class="sheet-title">${isEdit ? 'Редактировать товар' : 'Новый товар'}</div>
+    <div class="field"><label>Категория</label><select id="f-cat">${CATEGORIES.map((c) => `<option value="${c.key}" ${isEdit && edit.category === c.key ? 'selected' : ''}>${c.title}</option>`).join('')}</select></div>
     <div class="field"><label>Аватар товара</label>
       <div class="avatar-upload">
         <div class="avatar-preview" id="f-av-prev"></div>
@@ -570,11 +574,11 @@ function openProductForm() {
         <input id="f-av-file" type="file" accept="image/*" hidden>
       </div>
     </div>
-    <div class="field"><label>Название</label><input id="f-title" maxlength="120" placeholder="Напр. Telegram-канал 50к подписчиков"></div>
+    <div class="field"><label>Название</label><input id="f-title" maxlength="120" value="${isEdit ? esc(edit.title) : ''}" placeholder="Напр. Telegram-канал 50к подписчиков"></div>
     <div id="f-channel"></div>
-    <div class="field"><label>Описание</label><textarea id="f-desc" maxlength="4000" placeholder="Расскажите о товаре, условиях передачи и т.д."></textarea></div>
-    <div class="field"><label>Цена, ₽ (0 — договорная)</label><input id="f-price" type="number" inputmode="numeric" min="0" value="0"></div>
-    <button class="btn" id="f-submit">${ic('check-lg')} Опубликовать</button>`);
+    <div class="field"><label>Описание</label><textarea id="f-desc" maxlength="4000" placeholder="Расскажите о товаре, условиях передачи и т.д.">${isEdit ? esc(edit.description) : ''}</textarea></div>
+    <div class="field"><label>Цена, ₽ (0 — договорная)</label><input id="f-price" type="number" inputmode="numeric" min="0" value="${isEdit ? (edit.price || 0) : 0}"></div>
+    <button class="btn" id="f-submit">${ic('check-lg')} ${isEdit ? 'Сохранить' : 'Опубликовать'}</button>`);
 
   const catSel = document.getElementById('f-cat');
   const chanBox = document.getElementById('f-channel');
@@ -618,9 +622,9 @@ function openProductForm() {
         <div class="genre-pick" id="f-genres">${CHANNEL_GENRES.map((gname) =>
           `<button type="button" class="chip ${genresSel.has(gname) ? 'active' : ''}" data-g="${esc(gname)}">${esc(gname)}</button>`).join('')}</div>
       </div>
-      <div class="field"><label>Подписчики</label><input id="f-subs" type="number" inputmode="numeric" min="0" placeholder="напр. 52000"></div>
-      <div class="field"><label>Охват поста за 24 ч</label><input id="f-reach" type="number" inputmode="numeric" min="0" placeholder="напр. 18000"></div>
-      <div class="field"><label>Средний возраст аудитории</label><input id="f-age" maxlength="40" placeholder="напр. 25–34"></div>
+      <div class="field"><label>Подписчики</label><input id="f-subs" type="number" inputmode="numeric" min="0" value="${initSubs}" placeholder="напр. 52000"></div>
+      <div class="field"><label>Охват поста за 24 ч</label><input id="f-reach" type="number" inputmode="numeric" min="0" value="${initReach}" placeholder="напр. 18000"></div>
+      <div class="field"><label>Средний возраст аудитории</label><input id="f-age" maxlength="40" value="${esc(initAge)}" placeholder="напр. 25–34"></div>
       <div class="field"><label>Скриншоты статистики</label>
         <div class="shots-edit" id="f-shots">${shotsPreview()}</div>
         <label class="upload-btn" for="f-file">${ic('image')} Добавить скриншот</label>
@@ -668,9 +672,11 @@ function openProductForm() {
     }
     if (body.title.length < 3) return toast('Введите название (мин. 3 символа)');
     try {
-      await API.post('/products', body);
-      haptic('success'); closeSheet(); toast('Товар опубликован');
+      if (isEdit) await API.put('/products/' + edit.id, body);
+      else await API.post('/products', body);
+      haptic('success'); toast(isEdit ? 'Изменения сохранены' : 'Товар опубликован');
       if (state.tab === 'catalog') loadCatalogList();
+      openMyProducts();
     } catch (e) { toast(e.message); }
   });
 }
@@ -1045,12 +1051,41 @@ async function renderProfile() {
   } catch (e) { viewEl.innerHTML = emptyState('exclamation-triangle', e.message || 'Ошибка загрузки профиля'); }
 }
 
+function myProductCard(p, i) {
+  return `<div class="mp-item">
+    ${productCard(p, i)}
+    <div class="mp-actions">
+      <button class="mp-btn" data-edit="${p.id}">${ic('pencil')} Изменить</button>
+      <button class="mp-btn" data-toggle="${p.id}">${ic(p.status === 'active' ? 'eye-slash' : 'eye')} ${p.status === 'active' ? 'Скрыть' : 'Показать'}</button>
+      <button class="mp-btn danger" data-del="${p.id}">${ic('trash')} Удалить</button>
+    </div>
+  </div>`;
+}
+
 async function openMyProducts() {
   openSheet('<div class="loader"><span class="spin"></span></div>');
   try {
     const items = await API.get('/products/mine');
-    openSheet(`<div class="sheet-title">Мои товары</div>${items.length ? '<div class="plist">' + items.map((p, i) => productCard(p, i)).join('') + '</div>' : emptyState('bag', 'У вас нет товаров')}`);
+    openSheet(`
+      <div class="sheet-title">Мои товары</div>
+      <button class="btn mb12" id="mp-add">${ic('plus-lg')} Добавить товар</button>
+      ${items.length ? items.map((p, i) => myProductCard(p, i)).join('') : emptyState('bag', 'У вас пока нет товаров.\nНажмите «Добавить товар».')}`);
+    const byId = (id) => items.find((x) => x.id === Number(id));
+    document.getElementById('mp-add').addEventListener('click', () => openProductForm());
     sheetBody.querySelectorAll('.pcard').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
+    sheetBody.querySelectorAll('[data-edit]').forEach((b) =>
+      b.addEventListener('click', () => openProductForm(byId(b.dataset.edit))));
+    sheetBody.querySelectorAll('[data-toggle]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        const p = byId(b.dataset.toggle);
+        await API.patch(`/products/${p.id}/status`, { status: p.status === 'active' ? 'hidden' : 'active' });
+        haptic('light'); toast('Готово'); openMyProducts();
+      }));
+    sheetBody.querySelectorAll('[data-del]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        if (!(await confirmDialog('Удалить товар?'))) return;
+        await API.del('/products/' + b.dataset.del); haptic('success'); toast('Удалено'); openMyProducts();
+      }));
   } catch (e) { openSheet(emptyState('exclamation-triangle', e.message)); }
 }
 async function openMyRequests() {

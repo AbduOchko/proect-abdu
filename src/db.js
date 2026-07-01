@@ -242,6 +242,19 @@ export function updateProductStatus(id, status) {
   return getProduct(id);
 }
 
+export function updateProduct(id, { category, title, description, price, genres, subscribers, reach24, avg_age, screenshots, avatar }) {
+  db.prepare(
+    `UPDATE products SET category=?, title=?, description=?, price=?, genres=?, subscribers=?, reach24=?, avg_age=?, screenshots=?, avatar=? WHERE id=?`
+  ).run(
+    category, title, description || '', Number(price) || 0,
+    JSON.stringify(Array.isArray(genres) ? genres.slice(0, 12) : []),
+    Number(subscribers) || 0, Number(reach24) || 0, String(avg_age || '').slice(0, 40),
+    JSON.stringify(Array.isArray(screenshots) ? screenshots.slice(0, 8) : []),
+    String(avatar || ''), Number(id)
+  );
+  return getProduct(id);
+}
+
 export function deleteProduct(id) {
   db.prepare('DELETE FROM products WHERE id=?').run(Number(id));
 }
