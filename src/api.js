@@ -331,10 +331,21 @@ api.post('/deals/:id/complete', (req, res) => {
   const { d, role } = ld;
   if (role !== 'buyer') return res.status(403).json({ error: 'forbidden', message: 'Только покупатель' });
   if (d.status !== 'review') return bad(res, 'Сейчас нельзя подтвердить получение');
-  const rating = req.body.rating ? Math.max(1, Math.min(5, num(req.body.rating))) : null;
-  const updated = db.completeDeal(d.id, { rating });
-  notifyUser(d.seller_id, `🎉 Покупатель подтвердил получение по «${d.title}». На баланс зачислено ${fmtMoney(d.amount)}.`);
+  const rating = Math.max(0, Math.min(5, num(req.body.rating)));
+  const comment = str(req.body.comment, 1000);
+  if (!rating) return bad(res, 'Поставьте оценку от 1 до 5 звёзд');
+  if (comment.length < 3) return bad(res, 'Напишите комментарий к отзыву (минимум 3 символа)');
+  const updated = db.completeDeal(d.id, {}); // рейтинг добавит отзыв ниже
+  db.addReview({ dealId: d.id, buyerId: d.buyer_id, sellerId: d.seller_id, productId: d.product_id, stars: rating, comment });
+  notifyUser(d.seller_id, `🎉 Покупатель подтвердил получение по «${d.title}» и оставил отзыв (${rating}★). На баланс зачислено ${fmtMoney(d.amount)}.`);
   res.json(updated);
+});
+
+// Отзывы о продавце
+api.get('/reviews', (req, res) => {
+  const sellerId = num(req.query.sellerId);
+  if (!sellerId) return res.json([]);
+  res.json(db.listSellerReviews(sellerId, 20));
 });
 
 // Отмена сделки (правила из эскроу)

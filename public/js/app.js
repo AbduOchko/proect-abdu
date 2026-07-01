@@ -542,7 +542,10 @@ function renderProductPage(p) {
         </div>
         ${mine ? '' : `<span class="sc-chev">${ic('chevron-right')}</span>`}
       </div>
-    </div>`;
+    </div>
+    <div id="pp-reviews"></div>`;
+
+  loadSellerReviews(p.seller_id);
 
   let actionsHtml;
   if (mine) {
@@ -580,6 +583,26 @@ function openLightbox(url) {
   lb.innerHTML = `<button class="lb-close">${ic('x-lg')}</button><img src="${esc(url)}" alt="">`;
   lb.style.display = 'flex';
   lb.onclick = () => { lb.style.display = 'none'; };
+}
+function reviewStars(n) {
+  return '<span class="review-stars">' + [1, 2, 3, 4, 5].map((i) => ic('star' + (i <= n ? '-fill' : ''))).join('') + '</span>';
+}
+function reviewCard(r) {
+  const u = { first_name: r.buyer_name, username: r.buyer_username, photo_url: r.buyer_photo };
+  return `<div class="review-card">
+    <div class="review-head">${avatarHtml(u)}<span class="review-name">${userName(u)}</span><span class="review-date">${timeAgo(r.created_at)}</span></div>
+    ${reviewStars(r.stars)}
+    <div class="review-text">${esc(r.comment)}</div>
+  </div>`;
+}
+async function loadSellerReviews(sellerId) {
+  const box = document.getElementById('pp-reviews');
+  if (!box) return;
+  try {
+    const reviews = await API.get('/reviews?sellerId=' + sellerId);
+    if (!reviews.length) return;
+    box.innerHTML = `<div class="pp-section"><div class="pp-label">Отзывы о продавце (${reviews.length})</div>${reviews.map(reviewCard).join('')}</div>`;
+  } catch (e) {}
 }
 function statusProductLabel(s) { return { active: 'Активен', hidden: 'Скрыт', sold: 'Продан' }[s] || s; }
 
@@ -1071,11 +1094,12 @@ async function dealAction(d, action, role) {
 function completeDealWithRating(d) {
   const box = document.getElementById('deal-actions');
   box.innerHTML = `
-    <div class="escrow-note mt8">${ic('info-circle')} После подтверждения ${money(d.amount)} уйдут продавцу. Оцените продавца:</div>
+    <div class="escrow-note mt8">${ic('info-circle')} После подтверждения ${money(d.amount)} уйдут продавцу. Оставьте отзыв о продавце — оценка и комментарий обязательны.</div>
     <div id="rate-stars" style="text-align:center;font-size:36px;letter-spacing:8px;color:var(--gold);margin:10px 0">
       ${[1, 2, 3, 4, 5].map((n) => `<i class="bi bi-star" data-star="${n}" style="cursor:pointer"></i>`).join('')}
     </div>
-    <button class="btn success" id="rate-confirm">${ic('patch-check')} Подтвердить получение</button>`;
+    <div class="field"><textarea id="rate-comment" maxlength="1000" placeholder="Комментарий к отзыву (обязательно): как прошла сделка, качество товара, общение с продавцом..."></textarea></div>
+    <button class="btn success" id="rate-confirm">${ic('patch-check')} Подтвердить и оставить отзыв</button>`;
   let rating = 5;
   const paint = () => box.querySelectorAll('[data-star]').forEach((s) => {
     s.className = 'bi bi-star' + (Number(s.dataset.star) <= rating ? '-fill' : '');
@@ -1084,9 +1108,12 @@ function completeDealWithRating(d) {
     s.addEventListener('click', () => { rating = Number(s.dataset.star); paint(); haptic('light'); }));
   paint();
   document.getElementById('rate-confirm').addEventListener('click', async () => {
+    const comment = document.getElementById('rate-comment').value.trim();
+    if (!rating) return toast('Поставьте оценку от 1 до 5 звёзд');
+    if (comment.length < 3) return toast('Напишите комментарий к отзыву');
     try {
-      await API.post(`/deals/${d.id}/complete`, { rating });
-      haptic('success'); toast('Сделка завершена! Спасибо'); closeSheet(); loadDealsList();
+      await API.post(`/deals/${d.id}/complete`, { rating, comment });
+      haptic('success'); toast('Сделка завершена! Спасибо за отзыв'); closeSheet(); loadDealsList();
     } catch (e) { toast(e.message); haptic('error'); }
   });
 }

@@ -120,6 +120,19 @@ CREATE TABLE IF NOT EXISTS withdrawals (
   processed_at INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_wd_status ON withdrawals(status, id);
+
+CREATE TABLE IF NOT EXISTS reviews (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  deal_id     INTEGER,
+  buyer_id    INTEGER NOT NULL,
+  seller_id   INTEGER NOT NULL,
+  product_id  INTEGER DEFAULT 0,
+  stars       INTEGER NOT NULL,
+  comment     TEXT    NOT NULL,
+  created_at  INTEGER,
+  UNIQUE(deal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_seller ON reviews(seller_id, id);
 `);
 
 // ---- Миграции: добавляем новые колонки, если их нет ----
@@ -598,6 +611,30 @@ export function rejectWithdrawal(id) {
     db.prepare("UPDATE withdrawals SET status='rejected', processed_at=? WHERE id=?").run(now(), Number(id));
     return getWithdrawal(id);
   })();
+}
+
+// ================= REVIEWS (отзывы) =================
+export function addReview({ dealId, buyerId, sellerId, productId, stars, comment }) {
+  const s = Math.max(1, Math.min(5, Number(stars) || 0));
+  const existing = db.prepare('SELECT id FROM reviews WHERE deal_id=?').get(Number(dealId));
+  if (existing) return db.prepare('SELECT * FROM reviews WHERE id=?').get(existing.id);
+  const info = db.prepare(
+    'INSERT INTO reviews (deal_id, buyer_id, seller_id, product_id, stars, comment, created_at) VALUES (?,?,?,?,?,?,?)'
+  ).run(Number(dealId), Number(buyerId), Number(sellerId), Number(productId) || 0, s, String(comment).slice(0, 1000), now());
+  addRating(sellerId, s); // обновляем агрегированный рейтинг продавца
+  return db.prepare('SELECT * FROM reviews WHERE id=?').get(info.lastInsertRowid);
+}
+
+export function getReviewByDeal(dealId) {
+  return db.prepare('SELECT * FROM reviews WHERE deal_id=?').get(Number(dealId));
+}
+
+export function listSellerReviews(sellerId, limit = 20) {
+  return db.prepare(
+    `SELECT r.*, u.first_name AS buyer_name, u.username AS buyer_username, u.photo_url AS buyer_photo
+     FROM reviews r JOIN users u ON u.id = r.buyer_id
+     WHERE r.seller_id = ? ORDER BY r.id DESC LIMIT ?`
+  ).all(Number(sellerId), limit);
 }
 
 // ================= ADMIN STATS =================
