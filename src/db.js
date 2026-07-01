@@ -99,7 +99,26 @@ CREATE INDEX IF NOT EXISTS idx_deals_buyer ON deals(buyer_id);
 CREATE INDEX IF NOT EXISTS idx_deals_seller ON deals(seller_id);
 `);
 
+// ---- Миграции: добавляем новые колонки, если их нет ----
+function ensureColumn(table, col, def) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+ensureColumn('products', 'genres', "TEXT DEFAULT '[]'");        // тематики канала (JSON-массив)
+ensureColumn('products', 'subscribers', 'INTEGER DEFAULT 0');    // подписчики
+ensureColumn('products', 'reach24', 'INTEGER DEFAULT 0');        // охват поста за 24ч
+ensureColumn('products', 'avg_age', "TEXT DEFAULT ''");          // средний возраст аудитории
+ensureColumn('products', 'screenshots', "TEXT DEFAULT '[]'");    // скриншоты статистики (JSON-массив URL)
+
 const now = () => Date.now();
+
+// Разворачивает JSON-поля товара в массивы
+function hydrateProduct(p) {
+  if (!p) return p;
+  try { p.genres = JSON.parse(p.genres || '[]'); } catch { p.genres = []; }
+  try { p.screenshots = JSON.parse(p.screenshots || '[]'); } catch { p.screenshots = []; }
+  return p;
+}
 
 // ================= USERS =================
 export function upsertUser(tg) {
@@ -171,13 +190,19 @@ export function listUsers({ q = '', limit = 50, offset = 0 } = {}) {
 }
 
 // ================= PRODUCTS =================
-export function createProduct({ seller_id, category, title, description, price }) {
+export function createProduct({ seller_id, category, title, description, price, genres, subscribers, reach24, avg_age, screenshots }) {
   const info = db
     .prepare(
-      `INSERT INTO products (seller_id, category, title, description, price, created_at)
-       VALUES (?,?,?,?,?,?)`
+      `INSERT INTO products (seller_id, category, title, description, price, genres, subscribers, reach24, avg_age, screenshots, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
     )
-    .run(Number(seller_id), category, title, description || '', Number(price) || 0, now());
+    .run(
+      Number(seller_id), category, title, description || '', Number(price) || 0,
+      JSON.stringify(Array.isArray(genres) ? genres.slice(0, 12) : []),
+      Number(subscribers) || 0, Number(reach24) || 0, String(avg_age || '').slice(0, 40),
+      JSON.stringify(Array.isArray(screenshots) ? screenshots.slice(0, 8) : []),
+      now()
+    );
   return getProduct(info.lastInsertRowid);
 }
 
@@ -189,7 +214,7 @@ const productSelect = `
   FROM products p JOIN users u ON u.id = p.seller_id`;
 
 export function getProduct(id) {
-  return db.prepare(`${productSelect} WHERE p.id = ?`).get(Number(id));
+  return hydrateProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(Number(id)));
 }
 
 export function listProducts({ category, q = '', sellerId, status = 'active', sort = 'new', minPrice, maxPrice, limit = 50, offset = 0 } = {}) {
@@ -207,7 +232,7 @@ export function listProducts({ category, q = '', sellerId, status = 'active', so
   else if (sort === 'expensive') order = 'p.price DESC';
   else if (sort === 'popular') order = 'p.views DESC';
   params.push(limit, offset);
-  return db.prepare(`${productSelect} ${where} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...params);
+  return db.prepare(`${productSelect} ${where} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...params).map(hydrateProduct);
 }
 
 export function updateProductStatus(id, status) {

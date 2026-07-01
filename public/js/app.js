@@ -56,6 +56,9 @@ const SORTS = [
 ];
 const sortShort = { new: 'Новые', cheap: 'Дешевле', expensive: 'Дороже', popular: 'Популярные' };
 
+// Тематики каналов
+const CHANNEL_GENRES = ['Новости', 'Юмор', 'Крипта', 'Бизнес', 'Технологии', 'Игры', 'Кино', 'Музыка', 'Спорт', 'Образование', 'Мода', 'Путешествия', 'Здоровье', 'Психология', 'Кулинария', 'Авто', 'Искусство', 'Политика', '18+', 'Другое'];
+
 const DEAL_STATUS = { pending: 'Ожидание', paid: 'Оплачено', completed: 'Завершена', cancelled: 'Отменена', disputed: 'Спор' };
 const DEAL_ICON = { pending: 'hourglass-split', paid: 'credit-card', completed: 'check-circle-fill', cancelled: 'x-circle', disputed: 'exclamation-triangle' };
 
@@ -78,6 +81,7 @@ const state = {
 };
 let chatOpen = false;
 let chatCtx = null;
+let productPageOpen = false;
 
 /* ================= helpers ================= */
 function esc(s) {
@@ -102,6 +106,31 @@ function money(n, zero) {
   n = Number(n) || 0;
   if (!n) return zero || 'Договорная';
   return n.toLocaleString('ru-RU') + ' ₽';
+}
+function fmtNum(n) {
+  n = Number(n) || 0;
+  if (n >= 1000000) return (n / 1000000).toFixed(1).replace('.0', '') + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1).replace('.0', '') + 'K';
+  return String(n);
+}
+// Сжатие изображения на клиенте перед загрузкой
+function compressImage(file, maxW = 1280, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith('image/')) return reject(new Error('not image'));
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const scale = Math.min(1, maxW / img.width);
+      const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(cv.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('load error')); };
+    img.src = url;
+  });
 }
 function timeAgo(ms) {
   if (!ms) return '';
@@ -172,10 +201,16 @@ overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSheet(
 
 function updateBackButton() {
   if (!tg || !tg.BackButton) return;
-  if (chatOpen || !overlay.hidden) tg.BackButton.show(); else tg.BackButton.hide();
+  if (chatOpen || productPageOpen || !overlay.hidden) tg.BackButton.show(); else tg.BackButton.hide();
 }
 if (tg && tg.BackButton) {
-  tg.BackButton.onClick(() => { if (chatOpen) closeChat(); else if (!overlay.hidden) closeSheet(); });
+  tg.BackButton.onClick(() => {
+    const lb = document.getElementById('lightbox');
+    if (lb && lb.style.display !== 'none' && lb.style.display !== '') { lb.style.display = 'none'; return; }
+    if (chatOpen) closeChat();
+    else if (productPageOpen) closeProductPage();
+    else if (!overlay.hidden) closeSheet();
+  });
 }
 
 function confirmDialog(message) {
@@ -228,9 +263,9 @@ function categoryChips(active) {
   return html + '</div>';
 }
 
-function skeletonGrid() {
-  const one = `<div class="pcard skeleton"><div class="pcard-cover"></div><div class="pcard-body"><div class="skel skel-1"></div><div class="skel skel-2"></div><div class="skel skel-3"></div></div></div>`;
-  return `<div class="pgrid">${one.repeat(6)}</div>`;
+function skeletonList() {
+  const one = `<div class="pcard skeleton"><div class="pcard-av"></div><div class="pcard-main"><div class="skel skel-1"></div><div class="skel skel-2"></div></div></div>`;
+  return `<div class="plist">${one.repeat(6)}</div>`;
 }
 function plural(n, one, few, many) {
   const m10 = n % 10, m100 = n % 100;
@@ -258,7 +293,7 @@ async function renderCatalog() {
         <button class="pill-btn ${hasPrice ? 'active' : ''}" id="cat-filter-btn">${ic('sliders2')} Фильтр</button>
       </div>
     </div>
-    <div id="cat-list">${skeletonGrid()}</div>`;
+    <div id="cat-list">${skeletonList()}</div>`;
 
   document.querySelectorAll('#view .chip').forEach((ch) =>
     ch.addEventListener('click', () => { s.category = ch.dataset.cat; renderCatalog(); }));
@@ -291,7 +326,7 @@ async function loadCatalogList() {
       ? `${items.length} ${plural(items.length, 'товар', 'товара', 'товаров')}`
       : 'Ничего не найдено';
     if (!items.length) { list.innerHTML = emptyState('bag', 'По вашему запросу\nничего не найдено'); return; }
-    list.innerHTML = `<div class="pgrid">${items.map(productCard).join('')}</div>`;
+    list.innerHTML = `<div class="plist">${items.map((p, i) => productCard(p, i)).join('')}</div>`;
     list.querySelectorAll('.pcard').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
   } catch (e) { list.innerHTML = emptyState('exclamation-triangle', e.message || 'Не удалось загрузить'); }
 }
@@ -339,57 +374,120 @@ function openFilterSheet() {
   });
 }
 
-function productCard(p) {
+function productCard(p, index) {
   const c = catByKey(p.category);
   const g = catGrad(p.category);
-  const seller = { first_name: p.seller_name, username: p.seller_username, photo_url: p.seller_photo };
-  const meta = Number(p.seller_rating) > 0
-    ? `<span class="pcard-rate">${ic('star-fill')} ${Number(p.seller_rating).toFixed(1)}</span>`
-    : `<span class="pcard-rate">${ic('eye')} ${p.views || 0}</span>`;
-  const ribbon = p.status && p.status !== 'active' ? `<span class="pcard-ribbon">${statusProductLabel(p.status)}</span>` : '';
-  return `<div class="pcard" data-id="${p.id}">
-    <div class="pcard-cover" style="--c1:${g[0]};--c2:${g[1]}">${ribbon}${ic(c.icon, 'pcard-cover-ic')}</div>
-    <div class="pcard-body">
-      <div class="pcard-cat">${ic(c.icon)} ${esc(c.title)}</div>
+  const isChannel = p.category === 'channel';
+  let specs = '';
+  if (isChannel && (p.subscribers || p.reach24)) {
+    const parts = [];
+    if (p.subscribers) parts.push(`${ic('people')} ${fmtNum(p.subscribers)}`);
+    if (p.reach24) parts.push(`${ic('graph-up')} ${fmtNum(p.reach24)}`);
+    specs = parts.join(' · ');
+  } else if (p.description) {
+    specs = esc(p.description);
+  }
+  let tags;
+  if (isChannel && p.genres && p.genres.length) {
+    tags = p.genres.slice(0, 2).map((x) => `<span class="tag">${esc(x)}</span>`).join('') +
+      (p.genres.length > 2 ? `<span class="tag more">+${p.genres.length - 2}</span>` : '');
+  } else {
+    tags = `<span class="tag">${ic(c.icon)} ${esc(c.title)}</span>`;
+  }
+  if (p.status && p.status !== 'active') tags += `<span class="tag more">${statusProductLabel(p.status)}</span>`;
+  const delay = Math.min((index || 0) * 45, 420);
+  return `<div class="pcard" data-id="${p.id}" style="--c1:${g[0]};--c2:${g[1]};--d:${delay}ms">
+    <div class="pcard-av">${ic(c.icon)}</div>
+    <div class="pcard-main">
       <div class="pcard-title">${esc(p.title)}</div>
-      <div class="pcard-price">${money(p.price)}</div>
-      <div class="pcard-seller">
-        <span class="pcard-seller-l">${avatarHtml(seller, 'xs')}<span class="pcard-seller-n">${userName(seller)}</span></span>
-        ${meta}
-      </div>
+      ${specs ? `<div class="pcard-specs">${specs}</div>` : ''}
+      <div class="pcard-tags">${tags}</div>
     </div>
+    <div class="pcard-price">${money(p.price)}</div>
   </div>`;
 }
 
+// ---------- полноэкранная страница товара ----------
 async function openProductDetail(id) {
-  openSheet('<div class="loader"><span class="spin"></span></div>');
+  let el = document.getElementById('product-page');
+  if (!el) { el = document.createElement('div'); el.id = 'product-page'; document.body.appendChild(el); }
+  el.innerHTML = `
+    <div class="pp-head">
+      <button class="back" id="pp-back">${ic('chevron-left')}</button>
+      <div class="pp-htitle">Товар</div>
+      <div style="width:34px"></div>
+    </div>
+    <div class="pp-scroll"><div class="loader"><span class="spin"></span></div></div>`;
+  el.style.display = 'flex';
+  productPageOpen = true;
+  document.body.style.overflow = 'hidden';
+  document.getElementById('pp-back').addEventListener('click', closeProductPage);
+  updateBackButton();
   try {
-    const p = await API.get('/products/' + id);
-    const c = catByKey(p.category);
-    const g = catGrad(p.category);
-    const mine = state.me && p.seller_id === state.me.id;
-    const seller = { first_name: p.seller_name, username: p.seller_username, photo_url: p.seller_photo };
-    let actions;
-    if (mine) {
-      actions = `<div class="btn-row">
-        <button class="btn secondary" data-act="toggle">${ic(p.status === 'active' ? 'eye-slash' : 'eye')} ${p.status === 'active' ? 'Скрыть' : 'Опубликовать'}</button>
-        <button class="btn danger" data-act="del">${ic('trash')} Удалить</button></div>`;
-    } else {
-      const off = p.status !== 'active';
-      actions = `<button class="btn" data-act="buy"${off ? ' disabled' : ''}>${ic('bag-check')} ${off ? 'Товар недоступен' : 'Купить · ' + money(p.price)}</button>
-        <button class="btn secondary mt8" data-act="chat">${ic('chat-dots')} Написать продавцу</button>`;
-    }
-    openSheet(`
-      <div class="detail-hero" style="--c1:${g[0]};--c2:${g[1]}">
-        ${ic(c.icon, 'detail-hero-ic')}
-        <div class="hero-chips">
-          <span class="hero-chip">${ic(c.icon)} ${esc(c.title)}</span>
-          ${p.status !== 'active' ? `<span class="hero-chip">${statusProductLabel(p.status)}</span>` : ''}
-        </div>
-        <div class="hero-price">${money(p.price)}</div>
+    renderProductPage(await API.get('/products/' + id));
+  } catch (e) {
+    el.querySelector('.pp-scroll').innerHTML = emptyState('exclamation-triangle', e.message || 'Ошибка');
+  }
+}
+
+function closeProductPage() {
+  productPageOpen = false;
+  const el = document.getElementById('product-page');
+  if (el) el.style.display = 'none';
+  document.body.style.overflow = overlay.hidden ? '' : 'hidden';
+  updateBackButton();
+  if (state.tab === 'catalog') loadCatalogList();
+}
+
+function renderProductPage(p) {
+  const el = document.getElementById('product-page');
+  if (!el) return;
+  const scroll = el.querySelector('.pp-scroll');
+  const c = catByKey(p.category);
+  const g = catGrad(p.category);
+  const mine = state.me && p.seller_id === state.me.id;
+  const seller = { first_name: p.seller_name, username: p.seller_username, photo_url: p.seller_photo };
+  const isChannel = p.category === 'channel';
+
+  const genresHtml = isChannel && p.genres && p.genres.length
+    ? `<div class="pp-section"><div class="pp-label">Тематики</div><div class="pp-tags">${p.genres.map((x) => `<span class="tag">${esc(x)}</span>`).join('')}</div></div>`
+    : '';
+
+  const rows = [];
+  if (isChannel) {
+    if (p.subscribers) rows.push([ic('people'), 'Подписчики', p.subscribers.toLocaleString('ru-RU')]);
+    if (p.reach24) rows.push([ic('graph-up'), 'Охват за 24 ч', p.reach24.toLocaleString('ru-RU')]);
+    if (p.avg_age) rows.push([ic('person'), 'Средний возраст', esc(p.avg_age)]);
+  }
+  const specsHtml = rows.length
+    ? `<div class="pp-section"><div class="pp-label">Характеристики</div><div class="list-group">${rows.map(([i, k, v]) => `<div class="ios-row"><span class="ios-ic">${i}</span><span class="label">${k}</span><span class="trailing">${v}</span></div>`).join('')}</div></div>`
+    : '';
+
+  const descHtml = p.description
+    ? `<div class="pp-section"><div class="pp-label">Описание</div><div class="pp-desc">${esc(p.description)}</div></div>`
+    : '';
+
+  const shotsHtml = (p.screenshots && p.screenshots.length)
+    ? `<div class="pp-section"><div class="pp-label">Скриншоты статистики</div><div class="pp-shots">${p.screenshots.map((u, i) => `<img class="pp-shot" src="${esc(u)}" data-shot="${i}" alt="">`).join('')}</div></div>`
+    : '';
+
+  scroll.innerHTML = `
+    <div class="pp-hero" style="--c1:${g[0]};--c2:${g[1]}">
+      ${ic(c.icon, 'pp-hero-ic')}
+      <div class="pp-hero-chips">
+        <span class="hero-chip">${ic(c.icon)} ${esc(c.title)}</span>
+        ${p.status !== 'active' ? `<span class="hero-chip">${statusProductLabel(p.status)}</span>` : ''}
       </div>
-      <div class="sheet-title" style="margin-top:16px">${esc(p.title)}</div>
-      ${p.description ? `<div class="detail-desc">${esc(p.description)}</div>` : '<div class="text-hint mb12">Без описания</div>'}
+      <div class="pp-hero-price">${money(p.price)}</div>
+    </div>
+    <div class="pp-title">${esc(p.title)}</div>
+    <div class="mini-stats">
+      <span class="mini-stat">${ic('eye')} ${p.views || 0} просмотров</span>
+      <span class="mini-stat">${ic('clock')} ${timeAgo(p.created_at)}</span>
+    </div>
+    ${genresHtml}${specsHtml}${descHtml}${shotsHtml}
+    <div class="pp-section">
+      <div class="pp-label">Продавец</div>
       <div class="seller-card${mine ? '' : ' tappable'}">
         ${avatarHtml(seller, 'md')}
         <div class="sc-main">
@@ -398,23 +496,44 @@ async function openProductDetail(id) {
         </div>
         ${mine ? '' : `<span class="sc-chev">${ic('chevron-right')}</span>`}
       </div>
-      <div class="mini-stats">
-        <span class="mini-stat">${ic('eye')} ${p.views || 0} просмотров</span>
-        <span class="mini-stat">${ic('clock')} ${timeAgo(p.created_at)}</span>
-      </div>
-      <div class="sheet-actions">${actions}</div>`);
-    sheetBody.querySelector('[data-act="buy"]')?.addEventListener('click', () => { if (p.status === 'active') buyProduct(p); });
-    sheetBody.querySelector('[data-act="chat"]')?.addEventListener('click', () => startChat(p.seller_id, p.id));
-    if (!mine) sheetBody.querySelector('.seller-card')?.addEventListener('click', () => startChat(p.seller_id, p.id));
-    sheetBody.querySelector('[data-act="toggle"]')?.addEventListener('click', async () => {
-      await API.patch(`/products/${p.id}/status`, { status: p.status === 'active' ? 'hidden' : 'active' });
-      toast('Готово'); closeSheet(); loadCatalogList();
-    });
-    sheetBody.querySelector('[data-act="del"]')?.addEventListener('click', async () => {
-      if (!(await confirmDialog('Удалить товар?'))) return;
-      await API.del('/products/' + p.id); toast('Удалено'); closeSheet(); loadCatalogList();
-    });
-  } catch (e) { openSheet(emptyState('exclamation-triangle', e.message || 'Ошибка')); }
+    </div>`;
+
+  let actionsHtml;
+  if (mine) {
+    actionsHtml = `<div class="btn-row">
+      <button class="btn secondary" data-act="toggle">${ic(p.status === 'active' ? 'eye-slash' : 'eye')} ${p.status === 'active' ? 'Скрыть' : 'Опубликовать'}</button>
+      <button class="btn danger" data-act="del">${ic('trash')} Удалить</button></div>`;
+  } else {
+    const off = p.status !== 'active';
+    actionsHtml = `<button class="btn" data-act="buy"${off ? ' disabled' : ''}>${ic('shield-check')} ${off ? 'Товар недоступен' : 'Безопасно купить · ' + money(p.price)}</button>
+      <button class="btn secondary mt8" data-act="chat">${ic('chat-dots')} Связаться с владельцем</button>`;
+  }
+  let bar = el.querySelector('.pp-actions');
+  if (!bar) { bar = document.createElement('div'); bar.className = 'pp-actions'; el.appendChild(bar); }
+  bar.innerHTML = actionsHtml;
+
+  scroll.querySelectorAll('[data-shot]').forEach((img) =>
+    img.addEventListener('click', () => openLightbox(p.screenshots[Number(img.dataset.shot)])));
+  if (!mine) scroll.querySelector('.seller-card')?.addEventListener('click', () => startChat(p.seller_id, p.id));
+  bar.querySelector('[data-act="buy"]')?.addEventListener('click', () => { if (p.status === 'active') buyProduct(p); });
+  bar.querySelector('[data-act="chat"]')?.addEventListener('click', () => startChat(p.seller_id, p.id));
+  bar.querySelector('[data-act="toggle"]')?.addEventListener('click', async () => {
+    await API.patch(`/products/${p.id}/status`, { status: p.status === 'active' ? 'hidden' : 'active' });
+    haptic('success'); toast('Готово'); closeProductPage();
+  });
+  bar.querySelector('[data-act="del"]')?.addEventListener('click', async () => {
+    if (!(await confirmDialog('Удалить товар?'))) return;
+    await API.del('/products/' + p.id); haptic('success'); toast('Удалено'); closeProductPage();
+  });
+}
+
+function openLightbox(url) {
+  if (!url) return;
+  let lb = document.getElementById('lightbox');
+  if (!lb) { lb = document.createElement('div'); lb.id = 'lightbox'; document.body.appendChild(lb); }
+  lb.innerHTML = `<button class="lb-close">${ic('x-lg')}</button><img src="${esc(url)}" alt="">`;
+  lb.style.display = 'flex';
+  lb.onclick = () => { lb.style.display = 'none'; };
 }
 function statusProductLabel(s) { return { active: 'Активен', hidden: 'Скрыт', sold: 'Продан' }[s] || s; }
 
@@ -422,27 +541,93 @@ async function buyProduct(p) {
   if (!(await confirmDialog(`Создать сделку на «${p.title}» за ${money(p.price)}?`))) return;
   try {
     const deal = await API.post('/deals', { productId: p.id });
-    haptic('success'); closeSheet(); toast('Сделка создана! Открыт чат с продавцом');
+    haptic('success');
+    if (productPageOpen) closeProductPage();
+    closeSheet();
+    toast('Сделка создана! Открыт чат с продавцом');
     await refreshUnread(); switchTab('deals');
     setTimeout(() => openDealDetail(deal.id), 220);
   } catch (e) { toast(e.message); haptic('error'); }
 }
 
 function openProductForm() {
+  const genresSel = new Set();
+  const shots = [];
   openSheet(`
     <div class="sheet-title">Новый товар</div>
     <div class="field"><label>Категория</label><select id="f-cat">${CATEGORIES.map((c) => `<option value="${c.key}">${c.title}</option>`).join('')}</select></div>
     <div class="field"><label>Название</label><input id="f-title" maxlength="120" placeholder="Напр. Telegram-канал 50к подписчиков"></div>
+    <div id="f-channel"></div>
     <div class="field"><label>Описание</label><textarea id="f-desc" maxlength="4000" placeholder="Расскажите о товаре, условиях передачи и т.д."></textarea></div>
     <div class="field"><label>Цена, ₽ (0 — договорная)</label><input id="f-price" type="number" inputmode="numeric" min="0" value="0"></div>
     <button class="btn" id="f-submit">${ic('check-lg')} Опубликовать</button>`);
+
+  const catSel = document.getElementById('f-cat');
+  const chanBox = document.getElementById('f-channel');
+
+  const shotsPreview = () => shots.map((u, i) =>
+    `<div class="shot-thumb"><img src="${esc(u)}"><button type="button" class="shot-rm" data-rm="${i}">${ic('x-lg')}</button></div>`).join('');
+  const refreshShots = () => {
+    const box = document.getElementById('f-shots');
+    if (!box) return;
+    box.innerHTML = shotsPreview();
+    box.querySelectorAll('[data-rm]').forEach((b) =>
+      b.addEventListener('click', () => { shots.splice(Number(b.dataset.rm), 1); refreshShots(); }));
+  };
+
+  function renderChannel() {
+    if (catSel.value !== 'channel') { chanBox.innerHTML = ''; return; }
+    chanBox.innerHTML = `
+      <div class="field"><label>Тематики канала</label>
+        <div class="genre-pick" id="f-genres">${CHANNEL_GENRES.map((gname) =>
+          `<button type="button" class="chip ${genresSel.has(gname) ? 'active' : ''}" data-g="${esc(gname)}">${esc(gname)}</button>`).join('')}</div>
+      </div>
+      <div class="field"><label>Подписчики</label><input id="f-subs" type="number" inputmode="numeric" min="0" placeholder="напр. 52000"></div>
+      <div class="field"><label>Охват поста за 24 ч</label><input id="f-reach" type="number" inputmode="numeric" min="0" placeholder="напр. 18000"></div>
+      <div class="field"><label>Средний возраст аудитории</label><input id="f-age" maxlength="40" placeholder="напр. 25–34"></div>
+      <div class="field"><label>Скриншоты статистики</label>
+        <div class="shots-edit" id="f-shots">${shotsPreview()}</div>
+        <label class="upload-btn" for="f-file">${ic('image')} Добавить скриншот</label>
+        <input id="f-file" type="file" accept="image/*" multiple hidden>
+      </div>`;
+    chanBox.querySelectorAll('[data-g]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const gname = b.dataset.g;
+        if (genresSel.has(gname)) genresSel.delete(gname); else genresSel.add(gname);
+        b.classList.toggle('active'); haptic('light');
+      }));
+    refreshShots();
+    const fileInput = document.getElementById('f-file');
+    fileInput.addEventListener('change', async () => {
+      const files = Array.from(fileInput.files || []);
+      fileInput.value = '';
+      for (const file of files) {
+        if (shots.length >= 8) { toast('Максимум 8 скриншотов'); break; }
+        try {
+          const { url } = await API.post('/upload', { image: await compressImage(file) });
+          shots.push(url); refreshShots();
+        } catch (e) { toast('Не удалось загрузить изображение'); }
+      }
+    });
+  }
+  catSel.addEventListener('change', renderChannel);
+  renderChannel();
+
   document.getElementById('f-submit').addEventListener('click', async () => {
+    const category = catSel.value;
     const body = {
-      category: document.getElementById('f-cat').value,
+      category,
       title: document.getElementById('f-title').value.trim(),
       description: document.getElementById('f-desc').value.trim(),
       price: Number(document.getElementById('f-price').value) || 0,
     };
+    if (category === 'channel') {
+      body.genres = [...genresSel];
+      body.subscribers = Number(document.getElementById('f-subs')?.value) || 0;
+      body.reach24 = Number(document.getElementById('f-reach')?.value) || 0;
+      body.avg_age = (document.getElementById('f-age')?.value || '').trim();
+      body.screenshots = shots;
+    }
     if (body.title.length < 3) return toast('Введите название (мин. 3 символа)');
     try {
       await API.post('/products', body);
@@ -826,7 +1011,7 @@ async function openMyProducts() {
   openSheet('<div class="loader"><span class="spin"></span></div>');
   try {
     const items = await API.get('/products/mine');
-    openSheet(`<div class="sheet-title">Мои товары</div>${items.length ? '<div class="pgrid">' + items.map(productCard).join('') + '</div>' : emptyState('bag', 'У вас нет товаров')}`);
+    openSheet(`<div class="sheet-title">Мои товары</div>${items.length ? '<div class="plist">' + items.map((p, i) => productCard(p, i)).join('') + '</div>' : emptyState('bag', 'У вас нет товаров')}`);
     sheetBody.querySelectorAll('.pcard').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
   } catch (e) { openSheet(emptyState('exclamation-triangle', e.message)); }
 }

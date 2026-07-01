@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
 import { api } from './api.js';
@@ -9,8 +10,11 @@ import './db.js'; // инициализация схемы БД
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '..', 'public');
 
+// Папка для загруженных скриншотов
+fs.mkdirSync(config.uploadsDir, { recursive: true });
+
 const app = express();
-app.use(express.json({ limit: '256kb' }));
+app.use(express.json({ limit: '8mb' })); // с запасом под base64-изображения
 
 // Заголовки, чтобы приложение корректно открывалось внутри Telegram
 app.use((req, res, next) => {
@@ -24,6 +28,9 @@ app.get('/health', (req, res) => res.json({ ok: true, time: Date.now() }));
 
 // REST API
 app.use('/api', api);
+
+// Загруженные скриншоты
+app.use('/uploads', express.static(config.uploadsDir, { maxAge: '7d', immutable: true }));
 
 // Статика: мини-приложение и админка
 app.use(express.static(publicDir));

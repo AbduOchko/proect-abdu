@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import path from 'node:path';
 
 function deriveWebappUrl() {
   if (process.env.WEBAPP_URL) return process.env.WEBAPP_URL.replace(/\/+$/, '');
@@ -22,6 +23,9 @@ export const config = {
   dbPath: process.env.DB_PATH || './data/marketplace.db',
   allowDevAuth: process.env.ALLOW_DEV_AUTH === '1' || process.env.ALLOW_DEV_AUTH === 'true',
 };
+
+// Папка для загруженных изображений — рядом с БД (чтобы делить один Volume на Railway)
+config.uploadsDir = path.join(path.dirname(path.resolve(config.dbPath)), 'uploads');
 
 export function isAdminId(id) {
   return config.adminIds.includes(Number(id));

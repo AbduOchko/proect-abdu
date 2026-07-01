@@ -1,6 +1,9 @@
 import express from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
 import { authMiddleware, adminOnly } from './auth.js';
-import { CATEGORY_KEYS, CATEGORIES, isAdminId } from './config.js';
+import { config, CATEGORY_KEYS, CATEGORIES, isAdminId } from './config.js';
 import * as db from './db.js';
 
 export const api = express.Router();
@@ -82,8 +85,39 @@ api.post('/products', (req, res) => {
   if (!validCat(category)) return bad(res, 'Некорректная категория');
   if (title.length < 3) return bad(res, 'Слишком короткое название');
   if (price < 0) return bad(res, 'Цена не может быть отрицательной');
-  const p = db.createProduct({ seller_id: req.user.id, category, title, description, price });
+  // Доп. поля храним только для каналов
+  const isChannel = category === 'channel';
+  const genres = isChannel && Array.isArray(req.body.genres)
+    ? req.body.genres.map((g) => str(g, 30)).filter(Boolean).slice(0, 12) : [];
+  const screenshots = isChannel && Array.isArray(req.body.screenshots)
+    ? req.body.screenshots.filter((u) => typeof u === 'string' && u.startsWith('/uploads/')).slice(0, 8) : [];
+  const p = db.createProduct({
+    seller_id: req.user.id, category, title, description, price,
+    genres,
+    subscribers: isChannel ? Math.max(0, num(req.body.subscribers)) : 0,
+    reach24: isChannel ? Math.max(0, num(req.body.reach24)) : 0,
+    avg_age: isChannel ? str(req.body.avg_age, 40) : '',
+    screenshots,
+  });
   res.status(201).json(p);
+});
+
+// Загрузка изображения (data URL -> файл в /uploads)
+const MIME_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+api.post('/upload', (req, res) => {
+  const dataUrl = String(req.body.image || '');
+  const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!m) return bad(res, 'Некорректное изображение');
+  const buf = Buffer.from(m[2], 'base64');
+  if (!buf.length) return bad(res, 'Пустой файл');
+  if (buf.length > 3 * 1024 * 1024) return bad(res, 'Файл слишком большой (макс. 3 МБ)');
+  const name = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${MIME_EXT[m[1]]}`;
+  try {
+    fs.writeFileSync(path.join(config.uploadsDir, name), buf);
+  } catch (e) {
+    return res.status(500).json({ error: 'server_error', message: 'Не удалось сохранить файл' });
+  }
+  res.status(201).json({ url: '/uploads/' + name });
 });
 
 api.patch('/products/:id/status', (req, res) => {

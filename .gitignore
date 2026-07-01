@@ -9,3 +9,6 @@ data/
 .DS_Store
 npm-debug.log*
 *.log
+
+# uploaded files
+uploads/
