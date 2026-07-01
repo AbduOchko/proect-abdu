@@ -270,7 +270,14 @@ function globalMeanRating() {
   const r = db.prepare('SELECT SUM(rating_sum) s, SUM(rating_count) c FROM users WHERE rating_count > 0').get();
   return r && r.c ? r.s / r.c : 4.5;
 }
-const RATING_SMOOTH = 5; // сколько «виртуальных» отзянов по средней оценке добавляем каждому продавцу
+const RATING_SMOOTH = 5; // сколько «виртуальных» отзывов по средней оценке добавляем каждому продавцу
+// Буст видимости для новых объявлений/новичков (даёт шанс на первые продажи).
+// Действует только пока объявление свежее и затухает к 0 за FRESH_DAYS.
+const FRESH_DAYS = 14;
+const FRESH_MS = FRESH_DAYS * 24 * 60 * 60 * 1000;
+const FRESH_BASE = 0.4;      // прибавка (в «звёздах») любому свежему объявлению
+const NEWCOMER_EXTRA = 0.6;  // доп. прибавка новичкам (мало отзывов), пока объявление свежее
+const NEWCOMER_REVIEWS = 5;  // после стольких отзывов «новичковая» добавка исчезает
 
 export function listProducts({ category, q = '', sellerId, status = 'active', sort = 'new', minPrice, maxPrice, limit = 50, offset = 0 } = {}) {
   const clauses = [];
@@ -287,10 +294,14 @@ export function listProducts({ category, q = '', sellerId, status = 'active', so
   else if (sort === 'expensive') order = 'p.price DESC';
   else if (sort === 'popular') order = 'p.views DESC';
   else if (sort === 'top') {
-    // Байесовский рейтинг продавца: (rating_sum + m*C) / (rating_count + m)
-    // — учитывает и среднюю оценку, и количество отзывов, устойчив к накрутке.
-    const bayes = (RATING_SMOOTH * globalMeanRating()).toFixed(4);
-    order = `((u.rating_sum + ${bayes}) / (u.rating_count + ${RATING_SMOOTH})) DESC, u.deals_count DESC, p.views DESC, p.created_at DESC`;
+    // Качество: байесовский рейтинг продавца (учитывает и среднюю оценку, и число отзывов).
+    const prior = (RATING_SMOOTH * globalMeanRating()).toFixed(4);
+    const bayes = `((u.rating_sum + ${prior}) / (u.rating_count + ${RATING_SMOOTH}))`;
+    // Буст: freshFactor (свежесть объявления 1→0) * (база + доп. для новичков).
+    const freshF = `max(0.0, 1.0 - CAST(${now()} - p.created_at AS REAL)/${FRESH_MS})`;
+    const newF = `max(0.0, 1.0 - CAST(u.rating_count AS REAL)/${NEWCOMER_REVIEWS})`;
+    const boost = `(${freshF}) * (${FRESH_BASE} + ${NEWCOMER_EXTRA} * (${newF}))`;
+    order = `(${bayes} + ${boost}) DESC, u.deals_count DESC, p.views DESC, p.created_at DESC`;
   }
   params.push(limit, offset);
   return db.prepare(`${productSelect} ${where} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...params).map(hydrateProduct);
