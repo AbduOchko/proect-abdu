@@ -247,6 +247,8 @@ input, textarea, select { font-family: inherit; font-size: 15px; }
   font-size: 14px; z-index: 100; max-width: 88%; text-align: center;
 }
 
+/* Атрибут hidden должен всегда скрывать элемент, даже если у него задан display */
+[hidden] { display: none !important; }
 .hidden { display: none !important; }
 .divider { height: 1px; background: var(--border); margin: 14px 0; }
 .text-hint { color: var(--hint); font-size: 13px; }
