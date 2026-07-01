@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Админ-панель — Маркет</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="stylesheet" href="/admin/admin.css" />
+</head>
+<body>
+  <div id="admin-app">
+    <header id="a-top">
+      <div class="a-top-title">🛠 Админ-панель</div>
+      <div class="a-top-sub" id="a-whoami"></div>
+    </header>
+
+    <nav id="a-nav">
+      <button class="a-nav-btn active" data-sec="stats">📊 Статистика</button>
+      <button class="a-nav-btn" data-sec="users">👥 Юзеры</button>
+      <button class="a-nav-btn" data-sec="products">🛍 Товары</button>
+      <button class="a-nav-btn" data-sec="requests">📥 Заявки</button>
+      <button class="a-nav-btn" data-sec="deals">🤝 Сделки</button>
+    </nav>
+
+    <main id="a-view"><div class="loader"><span class="spin"></span></div></main>
+  </div>
+  <div id="toast" hidden></div>
+  <script src="/admin/admin.js"></script>
+</body>
+</html>

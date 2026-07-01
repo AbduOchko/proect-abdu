@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Маркет цифровых товаров</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Верхняя панель -->
+    <header id="topbar">
+      <div id="topbar-title">Каталог</div>
+      <div id="topbar-action"></div>
+    </header>
+
+    <!-- Контент вкладки -->
+    <main id="view"></main>
+
+    <!-- Нижняя навигация -->
+    <nav id="tabbar">
+      <button class="tab" data-tab="catalog">
+        <span class="tab-ic">🛍</span><span class="tab-lb">Каталог</span>
+      </button>
+      <button class="tab" data-tab="exchange">
+        <span class="tab-ic">📊</span><span class="tab-lb">Биржа</span>
+      </button>
+      <button class="tab" data-tab="chats">
+        <span class="tab-ic">💬</span><span class="tab-lb">Чаты</span>
+        <span class="tab-badge" id="chats-badge" hidden>0</span>
+      </button>
+      <button class="tab" data-tab="deals">
+        <span class="tab-ic">🤝</span><span class="tab-lb">Сделки</span>
+      </button>
+      <button class="tab" data-tab="profile">
+        <span class="tab-ic">👤</span><span class="tab-lb">Профиль</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Модальное окно / нижний лист -->
+  <div id="sheet-overlay" hidden>
+    <div id="sheet">
+      <div id="sheet-handle"></div>
+      <div id="sheet-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" hidden></div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
