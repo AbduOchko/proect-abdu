@@ -6,7 +6,7 @@ if (tg) { tg.ready(); tg.expand(); }
 function applyTheme(scheme) {
   const dark = scheme === 'dark';
   document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
-  const bg = dark ? '#000000' : '#f5f5f7';
+  const bg = dark ? '#0c1110' : '#f5f5f7';
   try { tg && tg.setBackgroundColor && tg.setBackgroundColor(bg); } catch (e) {}
   try { tg && tg.setHeaderColor && tg.setHeaderColor(bg); } catch (e) {}
 }
