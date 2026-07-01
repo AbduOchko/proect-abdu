@@ -49,12 +49,13 @@ const CAT_GRAD = {
 const catGrad = (k) => CAT_GRAD[k] || CAT_GRAD.other;
 
 const SORTS = [
+  { v: 'top', l: 'Рекомендуемые (по рейтингу)', i: 'stars' },
   { v: 'new', l: 'Сначала новые', i: 'clock-history' },
   { v: 'cheap', l: 'Сначала дешёвые', i: 'sort-numeric-down' },
   { v: 'expensive', l: 'Сначала дорогие', i: 'sort-numeric-up-alt' },
   { v: 'popular', l: 'Популярные', i: 'fire' },
 ];
-const sortShort = { new: 'Новые', cheap: 'Дешевле', expensive: 'Дороже', popular: 'Популярные' };
+const sortShort = { top: 'Рекомендуемые', new: 'Новые', cheap: 'Дешевле', expensive: 'Дороже', popular: 'Популярные' };
 
 // Тематики каналов
 const CHANNEL_GENRES = ['Новости', 'Юмор', 'Крипта', 'Бизнес', 'Технологии', 'Игры', 'Кино', 'Музыка', 'Спорт', 'Образование', 'Мода', 'Путешествия', 'Здоровье', 'Психология', 'Кулинария', 'Авто', 'Искусство', 'Политика', '18+', 'Другое'];
@@ -81,7 +82,7 @@ const toastEl = document.getElementById('toast');
 const state = {
   tab: 'catalog',
   me: null,
-  catalog: { category: '', q: '', sort: 'new', minPrice: '', maxPrice: '' },
+  catalog: { category: '', q: '', sort: 'top', minPrice: '', maxPrice: '' },
   exchange: { category: '', q: '' },
   deals: { role: 'all' },
 };

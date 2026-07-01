@@ -264,6 +264,14 @@ export function getProduct(id) {
   return hydrateProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(Number(id)));
 }
 
+// Средняя оценка по всем отзывам сервиса — «приор» для байесовского рейтинга.
+// Используется, чтобы товары новых продавцов не улетали в топ по одному 5★.
+function globalMeanRating() {
+  const r = db.prepare('SELECT SUM(rating_sum) s, SUM(rating_count) c FROM users WHERE rating_count > 0').get();
+  return r && r.c ? r.s / r.c : 4.5;
+}
+const RATING_SMOOTH = 5; // сколько «виртуальных» отзянов по средней оценке добавляем каждому продавцу
+
 export function listProducts({ category, q = '', sellerId, status = 'active', sort = 'new', minPrice, maxPrice, limit = 50, offset = 0 } = {}) {
   const clauses = [];
   const params = [];
@@ -278,6 +286,12 @@ export function listProducts({ category, q = '', sellerId, status = 'active', so
   if (sort === 'cheap') order = 'p.price ASC';
   else if (sort === 'expensive') order = 'p.price DESC';
   else if (sort === 'popular') order = 'p.views DESC';
+  else if (sort === 'top') {
+    // Байесовский рейтинг продавца: (rating_sum + m*C) / (rating_count + m)
+    // — учитывает и среднюю оценку, и количество отзывов, устойчив к накрутке.
+    const bayes = (RATING_SMOOTH * globalMeanRating()).toFixed(4);
+    order = `((u.rating_sum + ${bayes}) / (u.rating_count + ${RATING_SMOOTH})) DESC, u.deals_count DESC, p.views DESC, p.created_at DESC`;
+  }
   params.push(limit, offset);
   return db.prepare(`${productSelect} ${where} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...params).map(hydrateProduct);
 }
