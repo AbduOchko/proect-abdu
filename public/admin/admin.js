@@ -27,7 +27,9 @@ const CATS = {
   script: { t: 'Скрипты', i: 'file-earmark-code' }, chat: { t: 'Чаты', i: 'chat-square-text' },
   code: { t: 'Коды', i: 'key' }, other: { t: 'Другое', i: 'box-seam' },
 };
-const DEAL_STATUS = { pending: 'Ожидание', paid: 'Оплачено', completed: 'Завершена', cancelled: 'Отменена', disputed: 'Спор' };
+const DEAL_STATUS = { created: 'Сделка создана', in_progress: 'В процессе', review: 'На проверке', completed: 'Завершена', cancelled: 'Отменена', disputed: 'Спор' };
+const WD_STATUS = { pending: 'На рассмотрении', approved: 'Выполнено', rejected: 'Отклонено' };
+const ACTIVE_DEAL = ['created', 'in_progress', 'review', 'disputed'];
 const catLabel = (k) => { const c = CATS[k] || { t: k, i: 'box-seam' }; return `${ic(c.i)} ${esc(c.t)}`; };
 
 function esc(s) {
@@ -84,6 +86,7 @@ function render() {
   if (section === 'products') return renderProducts();
   if (section === 'requests') return renderRequests();
   if (section === 'deals') return renderDeals();
+  if (section === 'withdrawals') return renderWithdrawals();
 }
 
 /* ---------- STATS ---------- */
@@ -96,11 +99,13 @@ async function renderStats() {
         <div class="stat-box"><div class="n">${s.banned}</div><div class="l">Заблокировано</div></div>
         <div class="stat-box"><div class="n accent">${s.products}</div><div class="l">Товаров (${s.productsActive} активн.)</div></div>
         <div class="stat-box"><div class="n accent">${s.requests}</div><div class="l">Заявок (${s.requestsActive} активн.)</div></div>
-        <div class="stat-box"><div class="n">${s.deals}</div><div class="l">Сделок всего</div></div>
+        <div class="stat-box"><div class="n">${s.dealsActive || 0}</div><div class="l">Активных сделок</div></div>
         <div class="stat-box"><div class="n">${s.dealsCompleted}</div><div class="l">Завершено</div></div>
         <div class="stat-box"><div class="n" style="color:var(--red)">${s.dealsDisputed}</div><div class="l">Споров</div></div>
-        <div class="stat-box"><div class="n">${s.messages}</div><div class="l">Сообщений</div></div>
-        <div class="stat-box wide"><div class="n accent">${money(s.volume)}</div><div class="l">Оборот завершённых сделок</div></div>
+        <div class="stat-box"><div class="n" style="color:var(--orange)">${s.withdrawPending || 0}</div><div class="l">Заявок на вывод</div></div>
+        <div class="stat-box wide"><div class="n accent">${money(s.escrow || 0)}</div><div class="l">Заморожено в сделках (эскроу)</div></div>
+        <div class="stat-box"><div class="n accent">${money(s.volume)}</div><div class="l">Оборот завершённых</div></div>
+        <div class="stat-box"><div class="n">${money(s.balances || 0)}</div><div class="l">Баланс пользователей</div></div>
       </div>`;
   } catch (e) { viewEl.innerHTML = errBox(e); }
 }
@@ -195,22 +200,63 @@ function requestItem(r) {
 async function renderDeals() {
   try {
     const items = await API.get('/admin/deals');
+    // споры и активные — вверх
+    items.sort((a, b) => (b.status === 'disputed') - (a.status === 'disputed') || b.id - a.id);
     viewEl.innerHTML = items.length ? items.map(dealItem).join('') : empty('Нет сделок');
     viewEl.querySelectorAll('.a-item').forEach((it) => {
       const id = it.dataset.id;
-      it.querySelector('[data-act="status"]')?.addEventListener('change', async (e) => {
-        await API.patch(`/admin/deals/${id}`, { status: e.target.value }); toast('Статус изменён');
-      });
+      const resolve = async (outcome) => {
+        if (!(await confirmDialog(outcome === 'release' ? 'Выплатить продавцу?' : 'Вернуть деньги покупателю?'))) return;
+        await API.post(`/admin/deals/${id}/resolve`, { outcome }); toast('Готово'); renderDeals();
+      };
+      it.querySelector('[data-act="release"]')?.addEventListener('click', () => resolve('release'));
+      it.querySelector('[data-act="refund"]')?.addEventListener('click', () => resolve('refund'));
     });
   } catch (e) { viewEl.innerHTML = errBox(e); }
 }
 function dealItem(d) {
-  const opts = Object.keys(DEAL_STATUS).map((k) => `<option value="${k}" ${k === d.status ? 'selected' : ''}>${DEAL_STATUS[k]}</option>`).join('');
+  const active = ACTIVE_DEAL.includes(d.status);
   return `<div class="a-item" data-id="${d.id}">
     <div class="a-item-head"><div><div class="a-item-title">${esc(d.title)} — ${money(d.amount)}</div>
       <div class="a-item-sub">${ic('cart')} ${userLabel(d.buyer_name, d.buyer_username, d.buyer_id)}<br>${ic('cash-coin')} ${userLabel(d.seller_name, d.seller_username, d.seller_id)}<br>${dt(d.created_at)}</div></div>
+      <span class="st st-${d.status}">${DEAL_STATUS[d.status] || d.status}</span>
     </div>
-    <div class="a-actions"><select class="a-select" data-act="status">${opts}</select></div>
+    ${active ? `<div class="a-actions">
+      <button class="a-btn green" data-act="release">${ic('cash-coin')} Продавцу</button>
+      <button class="a-btn red" data-act="refund">${ic('arrow-counterclockwise')} Покупателю</button>
+    </div>` : ''}
+  </div>`;
+}
+
+/* ---------- WITHDRAWALS ---------- */
+async function renderWithdrawals() {
+  try {
+    const items = await API.get('/admin/withdrawals');
+    items.sort((a, b) => (b.status === 'pending') - (a.status === 'pending') || b.id - a.id);
+    viewEl.innerHTML = items.length ? items.map(wdItem).join('') : empty('Заявок на вывод нет');
+    viewEl.querySelectorAll('.a-item').forEach((it) => {
+      const id = it.dataset.id;
+      it.querySelector('[data-act="approve"]')?.addEventListener('click', async () => {
+        if (!(await confirmDialog('Одобрить вывод? Средства уже списаны с баланса пользователя.'))) return;
+        await API.post(`/admin/withdrawals/${id}/approve`); toast('Одобрено'); renderWithdrawals();
+      });
+      it.querySelector('[data-act="reject"]')?.addEventListener('click', async () => {
+        if (!(await confirmDialog('Отклонить вывод? Средства вернутся на баланс.'))) return;
+        await API.post(`/admin/withdrawals/${id}/reject`); toast('Отклонено'); renderWithdrawals();
+      });
+    });
+  } catch (e) { viewEl.innerHTML = errBox(e); }
+}
+function wdItem(w) {
+  return `<div class="a-item" data-id="${w.id}">
+    <div class="a-item-head"><div><div class="a-item-title">${money(w.amount)}</div>
+      <div class="a-item-sub">${userLabel(w.first_name, w.username, w.user_id)}<br>${w.requisites ? '💳 ' + esc(w.requisites) + '<br>' : ''}${dt(w.created_at)}</div></div>
+      <span class="st st-${w.status === 'approved' ? 'completed' : w.status === 'rejected' ? 'cancelled' : 'created'}">${WD_STATUS[w.status] || w.status}</span>
+    </div>
+    ${w.status === 'pending' ? `<div class="a-actions">
+      <button class="a-btn green" data-act="approve">${ic('check-lg')} Одобрить</button>
+      <button class="a-btn red" data-act="reject">${ic('x-lg')} Отклонить</button>
+    </div>` : ''}
   </div>`;
 }
 

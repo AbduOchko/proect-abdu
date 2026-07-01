@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { authMiddleware, adminOnly } from './auth.js';
 import { config, CATEGORY_KEYS, CATEGORIES, isAdminId } from './config.js';
 import * as db from './db.js';
+import { notifyUser } from './notify.js';
 
 export const api = express.Router();
 
@@ -15,6 +16,7 @@ const num = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 const validCat = (c) => CATEGORY_KEYS.includes(c);
+const fmtMoney = (n) => (Number(n) || 0).toLocaleString('ru-RU') + ' ₽';
 function bad(res, msg) {
   return res.status(400).json({ error: 'bad_request', message: msg });
 }
@@ -262,7 +264,7 @@ api.post('/chats/:id/messages', (req, res) => {
   res.status(201).json(msg);
 });
 
-// ============ DEALS ============
+// ============ DEALS (эскроу) ============
 api.get('/deals', (req, res) => {
   const role = ['buyer', 'seller', 'all'].includes(req.query.role) ? req.query.role : 'all';
   res.json(db.listDeals(req.user.id, role));
@@ -276,44 +278,116 @@ api.get('/deals/:id', (req, res) => {
   res.json(d);
 });
 
+// Помощник: загрузить сделку и определить роль текущего пользователя
+function loadDeal(req, res) {
+  const d = db.getDeal(req.params.id);
+  if (!d) { res.status(404).json({ error: 'not_found' }); return null; }
+  const role = d.buyer_id === req.user.id ? 'buyer' : d.seller_id === req.user.id ? 'seller' : null;
+  if (!role) { res.status(403).json({ error: 'forbidden' }); return null; }
+  return { d, role };
+}
+
+// Покупка: оплата с баланса (заморозка средств) -> сделка «Сделка создана»
 api.post('/deals', (req, res) => {
-  const productId = num(req.body.productId);
-  const p = db.getProduct(productId);
+  const p = db.getProduct(num(req.body.productId));
   if (!p) return res.status(404).json({ error: 'not_found', message: 'Товар не найден' });
   if (p.seller_id === req.user.id) return bad(res, 'Нельзя купить свой товар');
   if (p.status !== 'active') return bad(res, 'Товар недоступен');
-  const deal = db.createDeal({ product: p, buyer_id: req.user.id });
-  // Автоматически открываем чат с продавцом по этому товару
+  if (!p.price || p.price <= 0) return bad(res, 'У товара договорная цена — оформите сделку через продавца в чате');
+  const r = db.createEscrowDeal(p, req.user.id);
+  if (r.error === 'insufficient') {
+    return res.status(400).json({ error: 'insufficient_funds', message: 'Недостаточно средств. Пополните баланс в профиле.' });
+  }
   db.getOrCreateChat(req.user.id, p.seller_id, p.id);
-  res.status(201).json(deal);
+  notifyUser(p.seller_id, `🛒 <b>Новая сделка</b> по «${p.title}» на ${fmtMoney(r.deal.amount)}.\nСредства покупателя заморожены. У вас <b>24 часа</b>, чтобы подтвердить сделку в приложении.`);
+  res.status(201).json(r.deal);
 });
 
-// Разрешённые переходы статусов и кто их может делать
-const DEAL_TRANSITIONS = {
-  paid: { from: ['pending'], roles: ['buyer'] },
-  completed: { from: ['pending', 'paid'], roles: ['buyer'] },
-  cancelled: { from: ['pending', 'paid'], roles: ['buyer', 'seller'] },
-  disputed: { from: ['pending', 'paid'], roles: ['buyer', 'seller'] },
-};
-
-api.patch('/deals/:id', (req, res) => {
-  const d = db.getDeal(req.params.id);
-  if (!d) return res.status(404).json({ error: 'not_found' });
-  const role = d.buyer_id === req.user.id ? 'buyer' : d.seller_id === req.user.id ? 'seller' : null;
-  if (!role) return res.status(403).json({ error: 'forbidden' });
-
-  const status = str(req.body.status, 20);
-  const rule = DEAL_TRANSITIONS[status];
-  if (!rule) return bad(res, 'Недопустимый статус');
-  if (!rule.roles.includes(role)) return res.status(403).json({ error: 'forbidden', message: 'Нет прав на это действие' });
-  if (!rule.from.includes(d.status)) return bad(res, `Нельзя перейти из «${d.status}» в «${status}»`);
-
-  const updated = db.updateDealStatus(d.id, status);
-  // Оценка продавца при завершении сделки
-  if (status === 'completed' && role === 'buyer' && req.body.rating) {
-    db.addRating(d.seller_id, num(req.body.rating));
-  }
+// Продавец подтверждает сделку -> «В процессе»
+api.post('/deals/:id/confirm', (req, res) => {
+  const ld = loadDeal(req, res); if (!ld) return;
+  const { d, role } = ld;
+  if (role !== 'seller') return res.status(403).json({ error: 'forbidden', message: 'Только продавец' });
+  if (d.status !== 'created') return bad(res, 'Сделку сейчас нельзя подтвердить');
+  const updated = db.sellerConfirmDeal(d.id);
+  notifyUser(d.buyer_id, `✅ Продавец подтвердил сделку по «${d.title}». Статус: «В процессе». У продавца <b>24 часа</b> на передачу товара.`);
   res.json(updated);
+});
+
+// Продавец передал товар -> «На проверке»
+api.post('/deals/:id/deliver', (req, res) => {
+  const ld = loadDeal(req, res); if (!ld) return;
+  const { d, role } = ld;
+  if (role !== 'seller') return res.status(403).json({ error: 'forbidden', message: 'Только продавец' });
+  if (d.status !== 'in_progress') return bad(res, 'Сейчас нельзя передать на проверку');
+  const updated = db.sellerDeliverDeal(d.id);
+  notifyUser(d.buyer_id, `📦 Продавец передал товар по «${d.title}». Проверьте и нажмите «Подтвердить получение». Через <b>7 дней</b> сделка завершится автоматически.`);
+  res.json(updated);
+});
+
+// Покупатель подтверждает получение -> «Завершена», деньги продавцу
+api.post('/deals/:id/complete', (req, res) => {
+  const ld = loadDeal(req, res); if (!ld) return;
+  const { d, role } = ld;
+  if (role !== 'buyer') return res.status(403).json({ error: 'forbidden', message: 'Только покупатель' });
+  if (d.status !== 'review') return bad(res, 'Сейчас нельзя подтвердить получение');
+  const rating = req.body.rating ? Math.max(1, Math.min(5, num(req.body.rating))) : null;
+  const updated = db.completeDeal(d.id, { rating });
+  notifyUser(d.seller_id, `🎉 Покупатель подтвердил получение по «${d.title}». На баланс зачислено ${fmtMoney(d.amount)}.`);
+  res.json(updated);
+});
+
+// Отмена сделки (правила из эскроу)
+api.post('/deals/:id/cancel', (req, res) => {
+  const ld = loadDeal(req, res); if (!ld) return;
+  const { d, role } = ld;
+  let allowed = false;
+  if (role === 'seller' && ['created', 'in_progress'].includes(d.status)) allowed = true;
+  else if (role === 'buyer' && d.status === 'in_progress' && d.overdue) allowed = true;
+  if (!allowed) {
+    return bad(res, role === 'buyer'
+      ? 'Отменить можно только после просрочки передачи товара, либо через спор.'
+      : 'Сейчас отменить сделку нельзя.');
+  }
+  const updated = db.cancelDeal(d.id, { note: role === 'seller' ? 'Отменено продавцом' : 'Отменено покупателем (просрочка передачи)' });
+  const other = role === 'seller' ? d.buyer_id : d.seller_id;
+  notifyUser(other, `❌ Сделка по «${d.title}» отменена. Средства возвращены покупателю на баланс.`);
+  res.json(updated);
+});
+
+// Открыть спор
+api.post('/deals/:id/dispute', (req, res) => {
+  const ld = loadDeal(req, res); if (!ld) return;
+  const { d, role } = ld;
+  if (!['created', 'in_progress', 'review'].includes(d.status)) return bad(res, 'Спор сейчас открыть нельзя');
+  const updated = db.disputeDeal(d.id);
+  const other = role === 'buyer' ? d.seller_id : d.buyer_id;
+  notifyUser(other, `⚠️ По сделке «${d.title}» открыт спор. Решение примет администратор.`);
+  res.json(updated);
+});
+
+// ============ BALANCE / WITHDRAWALS ============
+api.get('/transactions', (req, res) => res.json(db.listTransactions(req.user.id, 50)));
+
+// Демо-пополнение баланса
+api.post('/balance/topup', (req, res) => {
+  const amount = Math.floor(num(req.body.amount));
+  if (amount <= 0) return bad(res, 'Некорректная сумма');
+  if (amount > 1000000) return bad(res, 'Слишком большая сумма (демо-лимит 1 000 000 ₽)');
+  const balance = db.deposit(req.user.id, amount);
+  res.json({ balance });
+});
+
+api.get('/withdrawals', (req, res) => res.json(db.listUserWithdrawals(req.user.id)));
+
+api.post('/withdrawals', (req, res) => {
+  const amount = Math.floor(num(req.body.amount));
+  const requisites = str(req.body.requisites, 200);
+  if (amount <= 0) return bad(res, 'Некорректная сумма');
+  const r = db.createWithdrawal(req.user.id, amount, requisites);
+  if (r.error === 'insufficient') return res.status(400).json({ error: 'insufficient_funds', message: 'Недостаточно средств на балансе' });
+  if (r.error === 'amount') return bad(res, 'Некорректная сумма');
+  res.status(201).json(r.withdrawal);
 });
 
 // ============ ADMIN ============
@@ -372,13 +446,46 @@ admin.get('/deals', (req, res) => {
   res.json(rows);
 });
 
-admin.patch('/deals/:id', (req, res) => {
-  const status = str(req.body.status, 20);
-  if (!['pending', 'paid', 'completed', 'cancelled', 'disputed'].includes(status))
-    return bad(res, 'Недопустимый статус');
-  const d = db.updateDealStatus(req.params.id, status);
+// Решение спора / принудительное закрытие сделки админом
+admin.post('/deals/:id/resolve', (req, res) => {
+  const outcome = str(req.body.outcome, 20); // 'release' -> продавцу, 'refund' -> покупателю
+  if (!['release', 'refund'].includes(outcome)) return bad(res, 'Некорректное решение');
+  const d = db.getDeal(req.params.id);
   if (!d) return res.status(404).json({ error: 'not_found' });
-  res.json(d);
+  if (!['disputed', 'created', 'in_progress', 'review'].includes(d.status)) return bad(res, 'Сделка уже закрыта');
+  const updated = db.resolveDispute(d.id, outcome);
+  const msg = outcome === 'release' ? 'в пользу продавца (выплата)' : 'возврат покупателю';
+  notifyUser(d.buyer_id, `⚖️ Спор по «${d.title}» решён: ${msg}.`);
+  notifyUser(d.seller_id, `⚖️ Спор по «${d.title}» решён: ${msg}.`);
+  res.json(updated);
+});
+
+// Заявки на вывод
+admin.get('/withdrawals', (req, res) => res.json(db.listWithdrawals(str(req.query.status, 20) || 'all')));
+
+admin.post('/withdrawals/:id/approve', (req, res) => {
+  const w = db.approveWithdrawal(req.params.id);
+  if (!w) return res.status(404).json({ error: 'not_found' });
+  notifyUser(w.user_id, `💸 Заявка на вывод ${fmtMoney(w.amount)} одобрена.`);
+  res.json(w);
+});
+
+admin.post('/withdrawals/:id/reject', (req, res) => {
+  const w = db.rejectWithdrawal(req.params.id);
+  if (!w) return res.status(404).json({ error: 'not_found' });
+  notifyUser(w.user_id, `↩️ Заявка на вывод ${fmtMoney(w.amount)} отклонена, средства возвращены на баланс.`);
+  res.json(w);
+});
+
+// Корректировка баланса пользователя админом
+admin.post('/users/:id/balance', (req, res) => {
+  const u = db.getUser(req.params.id);
+  if (!u) return res.status(404).json({ error: 'not_found' });
+  const delta = num(req.body.delta);
+  if (!delta) return bad(res, 'Укажите сумму (можно со знаком минус)');
+  if (delta < 0 && db.getBalance(u.id) + delta < 0) return bad(res, 'Баланс не может стать отрицательным');
+  const balance = db.balanceTx(u.id, delta, delta > 0 ? 'deposit' : 'withdraw_done', { note: 'Корректировка администратором' });
+  res.json({ balance });
 });
 
 api.use('/admin', admin);

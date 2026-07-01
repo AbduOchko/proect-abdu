@@ -97,6 +97,29 @@ CREATE TABLE IF NOT EXISTS deals (
 );
 CREATE INDEX IF NOT EXISTS idx_deals_buyer ON deals(buyer_id);
 CREATE INDEX IF NOT EXISTS idx_deals_seller ON deals(seller_id);
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL,
+  type          TEXT    NOT NULL,     -- deposit|hold|release|refund|withdraw_hold|withdraw_done|withdraw_refund
+  amount        REAL    NOT NULL,     -- знак: + пополнение, - списание
+  balance_after REAL    NOT NULL,
+  deal_id       INTEGER,
+  note          TEXT    DEFAULT '',
+  created_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id, id);
+
+CREATE TABLE IF NOT EXISTS withdrawals (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL,
+  amount       REAL    NOT NULL,
+  status       TEXT    DEFAULT 'pending',  -- pending|approved|rejected
+  requisites   TEXT    DEFAULT '',
+  created_at   INTEGER,
+  processed_at INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_wd_status ON withdrawals(status, id);
 `);
 
 // ---- Миграции: добавляем новые колонки, если их нет ----
@@ -110,8 +133,17 @@ ensureColumn('products', 'reach24', 'INTEGER DEFAULT 0');        // охват �
 ensureColumn('products', 'avg_age', "TEXT DEFAULT ''");          // средний возраст аудитории
 ensureColumn('products', 'screenshots', "TEXT DEFAULT '[]'");    // скриншоты статистики (JSON-массив URL)
 ensureColumn('products', 'avatar', "TEXT DEFAULT ''");           // аватар/логотип товара (URL)
+ensureColumn('deals', 'deadline_at', 'INTEGER DEFAULT 0');       // дедлайн текущего этапа сделки
 
 const now = () => Date.now();
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// Тайминги сделок (эскроу)
+export const DEAL_MS = {
+  confirm: 24 * 60 * 60 * 1000, // продавцу на подтверждение
+  deliver: 24 * 60 * 60 * 1000, // продавцу на передачу товара
+  review: 7 * 24 * 60 * 60 * 1000, // покупателю на проверку -> автозавершение
+};
 
 // Разворачивает JSON-поля товара в массивы
 function hydrateProduct(p) {
@@ -395,26 +427,32 @@ export function countUnread(userId) {
     .get(uid, uid, uid).n;
 }
 
-// ================= DEALS =================
-export function createDeal({ product, buyer_id }) {
-  const info = db
-    .prepare(
-      `INSERT INTO deals (product_id, title, category, buyer_id, seller_id, amount, status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?, 'pending', ?, ?)`
-    )
-    .run(
-      product.id,
-      product.title,
-      product.category,
-      Number(buyer_id),
-      Number(product.seller_id),
-      Number(product.price) || 0,
-      now(),
-      now()
-    );
-  return getDeal(info.lastInsertRowid);
+// ================= BALANCE / TRANSACTIONS =================
+export function getBalance(userId) {
+  const u = db.prepare('SELECT balance FROM users WHERE id=?').get(Number(userId));
+  return u ? round2(u.balance) : 0;
 }
 
+// Изменение баланса + запись в леджер. delta со знаком (+ пополнение / - списание).
+export function balanceTx(userId, delta, type, { dealId = null, note = '' } = {}) {
+  const uid = Number(userId);
+  const next = round2(getBalance(uid) + Number(delta));
+  db.prepare('UPDATE users SET balance=? WHERE id=?').run(next, uid);
+  db.prepare(
+    'INSERT INTO transactions (user_id, type, amount, balance_after, deal_id, note, created_at) VALUES (?,?,?,?,?,?,?)'
+  ).run(uid, type, round2(delta), next, dealId, note, now());
+  return next;
+}
+
+export function deposit(userId, amount, note = 'Пополнение баланса') {
+  return balanceTx(userId, Math.abs(round2(amount)), 'deposit', { note });
+}
+
+export function listTransactions(userId, limit = 50) {
+  return db.prepare('SELECT * FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT ?').all(Number(userId), limit);
+}
+
+// ================= DEALS (эскроу) =================
 const dealSelect = `
   SELECT d.*,
          b.username AS buyer_username, b.first_name AS buyer_name, b.photo_url AS buyer_photo,
@@ -423,8 +461,14 @@ const dealSelect = `
   JOIN users b ON b.id = d.buyer_id
   JOIN users s ON s.id = d.seller_id`;
 
+function enrichDeal(d) {
+  if (!d) return d;
+  d.overdue = ['created', 'in_progress', 'review'].includes(d.status) && d.deadline_at > 0 && now() > d.deadline_at;
+  return d;
+}
+
 export function getDeal(id) {
-  return db.prepare(`${dealSelect} WHERE d.id = ?`).get(Number(id));
+  return enrichDeal(db.prepare(`${dealSelect} WHERE d.id = ?`).get(Number(id)));
 }
 
 export function listDeals(userId, role = 'all') {
@@ -433,24 +477,127 @@ export function listDeals(userId, role = 'all') {
   let params = [uid, uid];
   if (role === 'buyer') { where = 'd.buyer_id = ?'; params = [uid]; }
   else if (role === 'seller') { where = 'd.seller_id = ?'; params = [uid]; }
-  return db.prepare(`${dealSelect} WHERE ${where} ORDER BY d.created_at DESC`).all(...params);
+  return db.prepare(`${dealSelect} WHERE ${where} ORDER BY d.created_at DESC`).all(...params).map(enrichDeal);
 }
 
-export function updateDealStatus(id, status) {
-  const deal = getDeal(id);
-  if (!deal) return null;
-  db.prepare('UPDATE deals SET status=?, updated_at=? WHERE id=?').run(status, now(), Number(id));
-  // При завершении сделки — засчитываем её обоим и помечаем товар проданным
-  if (status === 'completed' && deal.status !== 'completed') {
-    db.prepare('UPDATE users SET deals_count = deals_count + 1 WHERE id IN (?,?)').run(
-      deal.buyer_id,
-      deal.seller_id
-    );
-    if (deal.product_id) {
-      db.prepare("UPDATE products SET status='sold' WHERE id=?").run(deal.product_id);
-    }
-  }
+// Покупка: замораживаем средства покупателя и создаём сделку (status=created)
+export function createEscrowDeal(product, buyerId) {
+  const buyer = Number(buyerId);
+  const price = round2(product.price);
+  return db.transaction(() => {
+    if (getBalance(buyer) < price) return { error: 'insufficient' };
+    const info = db.prepare(
+      `INSERT INTO deals (product_id, title, category, buyer_id, seller_id, amount, status, created_at, updated_at, deadline_at)
+       VALUES (?,?,?,?,?,?, 'created', ?, ?, ?)`
+    ).run(product.id, product.title, product.category, buyer, Number(product.seller_id), price, now(), now(), now() + DEAL_MS.confirm);
+    const dealId = info.lastInsertRowid;
+    balanceTx(buyer, -price, 'hold', { dealId, note: `Оплата сделки #${dealId}: ${product.title}` });
+    return { deal: getDeal(dealId) };
+  })();
+}
+
+// Продавец подтвердил -> В процессе (24ч на передачу)
+export function sellerConfirmDeal(id) {
+  db.prepare('UPDATE deals SET status=?, deadline_at=?, updated_at=? WHERE id=?')
+    .run('in_progress', now() + DEAL_MS.deliver, now(), Number(id));
   return getDeal(id);
+}
+
+// Продавец передал -> На проверке (7 дней до автозавершения)
+export function sellerDeliverDeal(id) {
+  db.prepare('UPDATE deals SET status=?, deadline_at=?, updated_at=? WHERE id=?')
+    .run('review', now() + DEAL_MS.review, now(), Number(id));
+  return getDeal(id);
+}
+
+// Завершение: деньги продавцу
+export function completeDeal(id, { rating } = {}) {
+  return db.transaction(() => {
+    const d = getDeal(id);
+    if (!d || d.status === 'completed' || d.status === 'cancelled') return d;
+    balanceTx(d.seller_id, d.amount, 'release', { dealId: d.id, note: `Выплата по сделке #${d.id}` });
+    db.prepare('UPDATE deals SET status=?, deadline_at=0, updated_at=? WHERE id=?').run('completed', now(), d.id);
+    db.prepare('UPDATE users SET deals_count = deals_count + 1 WHERE id IN (?,?)').run(d.buyer_id, d.seller_id);
+    if (d.product_id) db.prepare("UPDATE products SET status='sold' WHERE id=?").run(d.product_id);
+    if (rating) addRating(d.seller_id, rating);
+    return getDeal(id);
+  })();
+}
+
+// Отмена: возврат покупателю (penalizeSeller — штрафной 1★ продавцу)
+export function cancelDeal(id, { penalizeSeller = false, note = '' } = {}) {
+  return db.transaction(() => {
+    const d = getDeal(id);
+    if (!d || d.status === 'completed' || d.status === 'cancelled') return d;
+    balanceTx(d.buyer_id, d.amount, 'refund', { dealId: d.id, note: note || `Возврат по сделке #${d.id}` });
+    db.prepare('UPDATE deals SET status=?, deadline_at=0, updated_at=? WHERE id=?').run('cancelled', now(), d.id);
+    if (penalizeSeller) addRating(d.seller_id, 1);
+    return getDeal(id);
+  })();
+}
+
+export function disputeDeal(id) {
+  db.prepare('UPDATE deals SET status=?, updated_at=? WHERE id=?').run('disputed', now(), Number(id));
+  return getDeal(id);
+}
+
+// Решение спора админом: 'release' — продавцу, 'refund' — покупателю
+export function resolveDispute(id, outcome) {
+  if (outcome === 'release') return completeDeal(id);
+  return cancelDeal(id, { note: `Спор решён в пользу покупателя (#${id})` });
+}
+
+// Фоновая обработка дедлайнов. Возвращает список событий для уведомлений.
+export function processDealTimeouts() {
+  const t = now();
+  const events = [];
+  for (const r of db.prepare("SELECT id FROM deals WHERE status='created' AND deadline_at>0 AND deadline_at < ?").all(t)) {
+    events.push({ type: 'auto_cancel', deal: cancelDeal(r.id, { penalizeSeller: true, note: 'Продавец не подтвердил сделку вовремя' }) });
+  }
+  for (const r of db.prepare("SELECT id FROM deals WHERE status='review' AND deadline_at>0 AND deadline_at < ?").all(t)) {
+    events.push({ type: 'auto_complete', deal: completeDeal(r.id, {}) });
+  }
+  return events;
+}
+
+// ================= WITHDRAWALS (вывод) =================
+export function createWithdrawal(userId, amount, requisites = '') {
+  const uid = Number(userId);
+  const amt = round2(amount);
+  return db.transaction(() => {
+    if (amt <= 0) return { error: 'amount' };
+    if (getBalance(uid) < amt) return { error: 'insufficient' };
+    balanceTx(uid, -amt, 'withdraw_hold', { note: 'Заявка на вывод средств' });
+    const info = db.prepare(
+      'INSERT INTO withdrawals (user_id, amount, status, requisites, created_at) VALUES (?,?,?,?,?)'
+    ).run(uid, amt, 'pending', String(requisites || '').slice(0, 200), now());
+    return { withdrawal: getWithdrawal(info.lastInsertRowid) };
+  })();
+}
+
+export function getWithdrawal(id) { return db.prepare('SELECT * FROM withdrawals WHERE id=?').get(Number(id)); }
+export function listUserWithdrawals(userId) {
+  return db.prepare('SELECT * FROM withdrawals WHERE user_id=? ORDER BY id DESC LIMIT 50').all(Number(userId));
+}
+export function listWithdrawals(status = 'all') {
+  return (status && status !== 'all')
+    ? db.prepare('SELECT w.*, u.first_name, u.username FROM withdrawals w JOIN users u ON u.id=w.user_id WHERE w.status=? ORDER BY w.id DESC LIMIT 200').all(status)
+    : db.prepare('SELECT w.*, u.first_name, u.username FROM withdrawals w JOIN users u ON u.id=w.user_id ORDER BY w.id DESC LIMIT 200').all();
+}
+export function approveWithdrawal(id) {
+  const w = getWithdrawal(id);
+  if (!w || w.status !== 'pending') return w;
+  db.prepare("UPDATE withdrawals SET status='approved', processed_at=? WHERE id=?").run(now(), Number(id));
+  return getWithdrawal(id);
+}
+export function rejectWithdrawal(id) {
+  return db.transaction(() => {
+    const w = getWithdrawal(id);
+    if (!w || w.status !== 'pending') return w;
+    balanceTx(w.user_id, w.amount, 'withdraw_refund', { note: `Вывод отклонён #${id}` });
+    db.prepare("UPDATE withdrawals SET status='rejected', processed_at=? WHERE id=?").run(now(), Number(id));
+    return getWithdrawal(id);
+  })();
 }
 
 // ================= ADMIN STATS =================
@@ -465,8 +612,13 @@ export function adminStats() {
     requestsActive: one("SELECT COUNT(*) n FROM requests WHERE status='active'").n,
     deals: one('SELECT COUNT(*) n FROM deals').n,
     dealsCompleted: one("SELECT COUNT(*) n FROM deals WHERE status='completed'").n,
+    dealsActive: one("SELECT COUNT(*) n FROM deals WHERE status IN ('created','in_progress','review')").n,
     dealsDisputed: one("SELECT COUNT(*) n FROM deals WHERE status='disputed'").n,
     volume: one("SELECT COALESCE(SUM(amount),0) v FROM deals WHERE status='completed'").v,
+    escrow: one("SELECT COALESCE(SUM(amount),0) v FROM deals WHERE status IN ('created','in_progress','review','disputed')").v,
+    balances: one('SELECT COALESCE(SUM(balance),0) v FROM users').v,
+    withdrawPending: one("SELECT COUNT(*) n FROM withdrawals WHERE status='pending'").n,
+    withdrawPendingSum: one("SELECT COALESCE(SUM(amount),0) v FROM withdrawals WHERE status='pending'").v,
     messages: one('SELECT COUNT(*) n FROM messages').n,
   };
 }

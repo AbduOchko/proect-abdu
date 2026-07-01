@@ -59,8 +59,14 @@ const sortShort = { new: 'Новые', cheap: 'Дешевле', expensive: 'До
 // Тематики каналов
 const CHANNEL_GENRES = ['Новости', 'Юмор', 'Крипта', 'Бизнес', 'Технологии', 'Игры', 'Кино', 'Музыка', 'Спорт', 'Образование', 'Мода', 'Путешествия', 'Здоровье', 'Психология', 'Кулинария', 'Авто', 'Искусство', 'Политика', '18+', 'Другое'];
 
-const DEAL_STATUS = { pending: 'Ожидание', paid: 'Оплачено', completed: 'Завершена', cancelled: 'Отменена', disputed: 'Спор' };
-const DEAL_ICON = { pending: 'hourglass-split', paid: 'credit-card', completed: 'check-circle-fill', cancelled: 'x-circle', disputed: 'exclamation-triangle' };
+const DEAL_STATUS = { created: 'Сделка создана', in_progress: 'В процессе', review: 'На проверке', completed: 'Завершена', cancelled: 'Отменена', disputed: 'Спор' };
+const DEAL_ICON = { created: 'lock-fill', in_progress: 'arrow-repeat', review: 'search', completed: 'check-circle-fill', cancelled: 'x-circle', disputed: 'exclamation-triangle' };
+// Что происходит на каждом этапе
+const DEAL_STAGE = {
+  created: 'Ожидаем подтверждения продавца',
+  in_progress: 'Продавец передаёт товар',
+  review: 'Покупатель проверяет товар',
+};
 
 /* ---------- DOM ---------- */
 const viewEl = document.getElementById('view');
@@ -578,16 +584,24 @@ function openLightbox(url) {
 function statusProductLabel(s) { return { active: 'Активен', hidden: 'Скрыт', sold: 'Продан' }[s] || s; }
 
 async function buyProduct(p) {
-  if (!(await confirmDialog(`Создать сделку на «${p.title}» за ${money(p.price)}?`))) return;
+  if (!(await confirmDialog(`Оплатить ${money(p.price)} с баланса и создать сделку?\n\nДеньги замораживаются в сделке и уйдут продавцу только после того, как вы подтвердите получение товара.`))) return;
   try {
     const deal = await API.post('/deals', { productId: p.id });
+    state.me = await API.get('/me'); // обновим баланс
     haptic('success');
     if (productPageOpen) closeProductPage();
     closeSheet();
-    toast('Сделка создана! Открыт чат с продавцом');
+    toast('Сделка создана, средства заморожены');
     await refreshUnread(); switchTab('deals');
     setTimeout(() => openDealDetail(deal.id), 220);
-  } catch (e) { toast(e.message); haptic('error'); }
+  } catch (e) {
+    haptic('error');
+    if (e.status === 400 && e.data && e.data.error === 'insufficient_funds') {
+      if (await confirmDialog('Недостаточно средств на балансе. Пополнить баланс?')) openTopupSheet();
+    } else {
+      toast(e.message);
+    }
+  }
 }
 
 function openProductForm(edit) {
@@ -951,11 +965,24 @@ async function loadDealsList() {
   } catch (e) { list.innerHTML = emptyState('exclamation-triangle', e.message); }
 }
 function dealRole(d) { return state.me && d.buyer_id === state.me.id ? 'buyer' : 'seller'; }
+
+function deadlineInfo(d) {
+  if (!['created', 'in_progress', 'review'].includes(d.status) || !d.deadline_at) return null;
+  const ms = d.deadline_at - Date.now();
+  const abs = Math.abs(ms);
+  let t;
+  if (abs >= 86400000) { const dd = Math.floor(abs / 86400000), hh = Math.floor((abs % 86400000) / 3600000); t = `${dd} дн${hh ? ' ' + hh + ' ч' : ''}`; }
+  else if (abs >= 3600000) { const h = Math.floor(abs / 3600000), m = Math.floor((abs % 3600000) / 60000); t = `${h} ч ${m} мин`; }
+  else { t = `${Math.max(1, Math.floor(abs / 60000))} мин`; }
+  return ms <= 0 ? { overdue: true, text: 'просрочено на ' + t } : { overdue: false, text: 'осталось ' + t };
+}
+
 function dealCard(d) {
   const role = dealRole(d);
   const other = role === 'buyer'
     ? { first_name: d.seller_name, username: d.seller_username, photo_url: d.seller_photo }
     : { first_name: d.buyer_name, username: d.buyer_username, photo_url: d.buyer_photo };
+  const di = deadlineInfo(d);
   return `<div class="card" data-id="${d.id}">
     <div class="card-top">
       <div style="min-width:0"><div class="card-title">${esc(d.title)}</div>
@@ -966,6 +993,7 @@ function dealCard(d) {
       <div class="mini-user">${avatarHtml(other)} ${userName(other)}</div>
       <span class="st st-${d.status}">${ic(DEAL_ICON[d.status])} ${DEAL_STATUS[d.status] || d.status}</span>
     </div>
+    ${di ? `<div class="deal-timer ${di.overdue ? 'overdue' : ''}">${ic(di.overdue ? 'exclamation-circle' : 'clock')} ${di.text}</div>` : ''}
   </div>`;
 }
 
@@ -977,9 +1005,16 @@ async function openDealDetail(id) {
     const other = role === 'buyer'
       ? { id: d.seller_id, first_name: d.seller_name, username: d.seller_username, photo_url: d.seller_photo }
       : { id: d.buyer_id, first_name: d.buyer_name, username: d.buyer_username, photo_url: d.buyer_photo };
+    const di = deadlineInfo(d);
+    const stage = DEAL_STAGE[d.status];
     openSheet(`
       <div class="sheet-title">${esc(d.title)}</div>
-      <span class="st st-${d.status}">${ic(DEAL_ICON[d.status])} ${DEAL_STATUS[d.status] || d.status}</span>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="st st-${d.status}">${ic(DEAL_ICON[d.status])} ${DEAL_STATUS[d.status] || d.status}</span>
+        ${di ? `<span class="deal-timer inline ${di.overdue ? 'overdue' : ''}">${ic(di.overdue ? 'exclamation-circle' : 'clock')} ${di.text}</span>` : ''}
+      </div>
+      ${stage ? `<p class="text-hint mt8">${esc(stage)}${d.status === 'review' ? ' · иначе завершится автоматически' : ''}</p>` : ''}
+      <div class="escrow-note mt12">${ic('shield-lock')} ${money(d.amount)} заморожены в сделке и уйдут продавцу только после подтверждения получения.</div>
       <div class="list-group mt12">
         <div class="ios-row"><span class="label">Роль</span><span class="trailing">${role === 'buyer' ? 'Покупатель' : 'Продавец'}</span></div>
         <div class="ios-row"><span class="label">Сумма</span><span class="trailing">${money(d.amount)}</span></div>
@@ -996,36 +1031,51 @@ async function openDealDetail(id) {
 function renderDealActions(d, role) {
   const box = document.getElementById('deal-actions');
   if (!box) return;
-  const btns = [];
-  if (role === 'buyer' && d.status === 'pending') btns.push(['success', 'paid', 'check-circle', 'Я оплатил']);
-  if (role === 'buyer' && (d.status === 'paid' || d.status === 'pending')) btns.push(['success', 'completed', 'patch-check', 'Подтвердить получение']);
-  if (d.status === 'pending' || d.status === 'paid') {
-    btns.push(['danger', 'cancelled', 'x-circle', 'Отменить']);
-    btns.push(['secondary', 'disputed', 'exclamation-triangle', 'Открыть спор']);
+  const btns = []; // [cls, action, icon, label]
+  if (role === 'seller') {
+    if (d.status === 'created') btns.push(['success', 'confirm', 'check-circle', 'Подтвердить сделку']);
+    if (d.status === 'in_progress') btns.push(['success', 'deliver', 'box-seam', 'Передать на проверку']);
+    if (['created', 'in_progress'].includes(d.status)) btns.push(['danger', 'cancel', 'x-circle', 'Отменить сделку']);
+  } else {
+    if (d.status === 'review') btns.push(['success', 'complete', 'patch-check', 'Подтвердить получение']);
+    if (d.status === 'in_progress' && d.overdue) btns.push(['danger', 'cancel', 'x-circle', 'Отменить и вернуть деньги']);
   }
-  if (!btns.length) { box.innerHTML = '<p class="text-hint" style="text-align:center;padding:8px">Сделка завершена</p>'; return; }
-  box.innerHTML = btns.map(([cls, st, i, label]) => `<button class="btn ${cls} sm mt8" data-st="${st}">${ic(i)} ${label}</button>`).join('');
-  box.querySelectorAll('[data-st]').forEach((b) => b.addEventListener('click', () => changeDealStatus(d, b.dataset.st, role)));
+  if (['created', 'in_progress', 'review'].includes(d.status)) btns.push(['secondary', 'dispute', 'exclamation-triangle', 'Открыть спор']);
+
+  let html = btns.map(([cls, act, i, label]) => `<button class="btn ${cls} sm mt8" data-do="${act}">${ic(i)} ${label}</button>`).join('');
+  if (d.status === 'created' && role === 'buyer') html = `<p class="text-hint" style="text-align:center;padding:6px">Ждём подтверждения продавца. Отменить можно после просрочки или через спор.</p>` + html;
+  if (d.status === 'in_progress' && role === 'buyer' && !d.overdue) html = `<p class="text-hint" style="text-align:center;padding:6px">Продавец передаёт товар. Отменить сможете после просрочки (24 ч).</p>` + html;
+  if (d.status === 'review' && role === 'seller') html = `<p class="text-hint" style="text-align:center;padding:6px">Ожидаем подтверждения покупателя.</p>` + html;
+  if (['completed', 'cancelled'].includes(d.status)) html = `<p class="text-hint" style="text-align:center;padding:8px">${d.status === 'completed' ? 'Сделка успешно завершена' : 'Сделка отменена, средства возвращены покупателю'}</p>`;
+  if (d.status === 'disputed') html = `<p class="text-hint" style="text-align:center;padding:8px">${ic('exclamation-triangle')} Спор рассматривается администратором</p>`;
+  box.innerHTML = html;
+  box.querySelectorAll('[data-do]').forEach((b) => b.addEventListener('click', () => dealAction(d, b.dataset.do, role)));
 }
 
-async function changeDealStatus(d, status, role) {
-  if (status === 'completed') return completeDealWithRating(d);
-  const labels = { paid: 'отметить как оплаченную', cancelled: 'отменить сделку', disputed: 'открыть спор' };
-  if (!(await confirmDialog('Вы уверены, что хотите ' + (labels[status] || 'изменить статус') + '?'))) return;
+async function dealAction(d, action, role) {
+  if (action === 'complete') return completeDealWithRating(d);
+  const texts = {
+    confirm: 'Подтвердить сделку? У вас будет 24 часа на передачу товара.',
+    deliver: 'Передать товар на проверку покупателю?',
+    cancel: role === 'seller' ? 'Отменить сделку? Деньги вернутся покупателю.' : 'Отменить сделку и вернуть свои деньги на баланс?',
+    dispute: 'Открыть спор? Решение примет администратор.',
+  };
+  if (!(await confirmDialog(texts[action] || 'Продолжить?'))) return;
   try {
-    await API.patch('/deals/' + d.id, { status });
-    haptic('success'); toast('Статус обновлён'); closeSheet(); loadDealsList();
+    await API.post(`/deals/${d.id}/${action}`, {});
+    if (action === 'cancel') state.me = await API.get('/me');
+    haptic('success'); toast('Готово'); closeSheet(); loadDealsList();
   } catch (e) { toast(e.message); haptic('error'); }
 }
 
 function completeDealWithRating(d) {
   const box = document.getElementById('deal-actions');
   box.innerHTML = `
-    <p class="text-hint mb12" style="text-align:center">Оцените продавца и подтвердите получение</p>
-    <div id="rate-stars" style="text-align:center;font-size:36px;letter-spacing:8px;color:var(--gold)">
+    <div class="escrow-note mt8">${ic('info-circle')} После подтверждения ${money(d.amount)} уйдут продавцу. Оцените продавца:</div>
+    <div id="rate-stars" style="text-align:center;font-size:36px;letter-spacing:8px;color:var(--gold);margin:10px 0">
       ${[1, 2, 3, 4, 5].map((n) => `<i class="bi bi-star" data-star="${n}" style="cursor:pointer"></i>`).join('')}
     </div>
-    <button class="btn success mt12" id="rate-confirm">${ic('patch-check')} Подтвердить</button>`;
+    <button class="btn success" id="rate-confirm">${ic('patch-check')} Подтвердить получение</button>`;
   let rating = 5;
   const paint = () => box.querySelectorAll('[data-star]').forEach((s) => {
     s.className = 'bi bi-star' + (Number(s.dataset.star) <= rating ? '-fill' : '');
@@ -1035,8 +1085,8 @@ function completeDealWithRating(d) {
   paint();
   document.getElementById('rate-confirm').addEventListener('click', async () => {
     try {
-      await API.patch('/deals/' + d.id, { status: 'completed', rating });
-      haptic('success'); toast('Сделка завершена! Спасибо за оценку'); closeSheet(); loadDealsList();
+      await API.post(`/deals/${d.id}/complete`, { rating });
+      haptic('success'); toast('Сделка завершена! Спасибо'); closeSheet(); loadDealsList();
     } catch (e) { toast(e.message); haptic('error'); }
   });
 }
@@ -1060,6 +1110,18 @@ async function renderProfile() {
         <div class="pstat"><div class="n">${me.deals_count || 0}</div><div class="l">Сделок</div></div>
         <div class="pstat"><div class="n">${me.rating_count || 0}</div><div class="l">Отзывов</div></div>
         <div class="pstat"><div class="n">${(me.rating || 0).toFixed(1)}</div><div class="l">Рейтинг</div></div>
+      </div>
+
+      <div class="balance-card">
+        <div class="balance-top">
+          <span class="balance-label">${ic('wallet2')} Баланс</span>
+          <span class="balance-amount">${money(me.balance || 0, '0 ₽')}</span>
+        </div>
+        <div class="balance-actions">
+          <button class="btn sm" id="pf-topup">${ic('plus-circle')} Пополнить</button>
+          <button class="btn secondary sm" id="pf-withdraw">${ic('cash-stack')} Вывести</button>
+        </div>
+        <button class="balance-history" id="pf-history">${ic('clock-history')} История операций</button>
       </div>
 
       <div class="section-label">О себе</div>
@@ -1086,7 +1148,90 @@ async function renderProfile() {
     });
     document.getElementById('pf-products').addEventListener('click', openMyProducts);
     document.getElementById('pf-requests').addEventListener('click', openMyRequests);
+    document.getElementById('pf-topup').addEventListener('click', openTopupSheet);
+    document.getElementById('pf-withdraw').addEventListener('click', openWithdrawSheet);
+    document.getElementById('pf-history').addEventListener('click', openHistorySheet);
   } catch (e) { viewEl.innerHTML = emptyState('exclamation-triangle', e.message || 'Ошибка загрузки профиля'); }
+}
+
+/* ================= WALLET (баланс) ================= */
+function openTopupSheet() {
+  const quick = [500, 1000, 5000, 10000];
+  openSheet(`
+    <div class="sheet-title">Пополнить баланс</div>
+    <p class="text-hint mb12">Демо-пополнение: средства зачисляются мгновенно, без реальной оплаты.</p>
+    <div class="field"><label>Сумма, ₽</label><input id="tp-amount" type="number" inputmode="numeric" min="1" value="1000"></div>
+    <div class="quick-amounts">${quick.map((a) => `<button type="button" class="chip" data-amt="${a}">+${a.toLocaleString('ru-RU')}</button>`).join('')}</div>
+    <button class="btn mt12" id="tp-submit">${ic('plus-circle')} Пополнить</button>`);
+  sheetBody.querySelectorAll('[data-amt]').forEach((b) =>
+    b.addEventListener('click', () => { document.getElementById('tp-amount').value = b.dataset.amt; }));
+  document.getElementById('tp-submit').addEventListener('click', async () => {
+    const amount = Math.floor(Number(document.getElementById('tp-amount').value) || 0);
+    if (amount <= 0) return toast('Введите сумму');
+    try {
+      const { balance } = await API.post('/balance/topup', { amount });
+      if (state.me) state.me.balance = balance;
+      haptic('success'); closeSheet(); toast('Баланс пополнен');
+      if (state.tab === 'profile') renderProfile();
+    } catch (e) { toast(e.message); }
+  });
+}
+
+function openWithdrawSheet() {
+  const bal = (state.me && state.me.balance) || 0;
+  openSheet(`
+    <div class="sheet-title">Вывод средств</div>
+    <p class="text-hint mb12">Доступно к выводу: <b>${money(bal, '0 ₽')}</b>. Заявку обработает администратор.</p>
+    <div class="field"><label>Сумма, ₽</label><input id="wd-amount" type="number" inputmode="numeric" min="1" placeholder="0"></div>
+    <div class="field"><label>Реквизиты (карта / кошелёк)</label><input id="wd-req" maxlength="200" placeholder="Куда вывести средства"></div>
+    <button class="btn" id="wd-submit">${ic('cash-stack')} Создать заявку</button>
+    <button class="btn secondary sm mt8" id="wd-history">${ic('list-ul')} Мои заявки на вывод</button>`);
+  document.getElementById('wd-submit').addEventListener('click', async () => {
+    const amount = Math.floor(Number(document.getElementById('wd-amount').value) || 0);
+    const requisites = document.getElementById('wd-req').value.trim();
+    if (amount <= 0) return toast('Введите сумму');
+    try {
+      await API.post('/withdrawals', { amount, requisites });
+      state.me = await API.get('/me');
+      haptic('success'); closeSheet(); toast('Заявка на вывод создана');
+      if (state.tab === 'profile') renderProfile();
+    } catch (e) {
+      if (e.status === 400 && e.data && e.data.error === 'insufficient_funds') toast('Недостаточно средств');
+      else toast(e.message);
+    }
+  });
+  document.getElementById('wd-history').addEventListener('click', openWithdrawHistory);
+}
+
+const WD_STATUS = { pending: 'На рассмотрении', approved: 'Выполнено', rejected: 'Отклонено' };
+async function openWithdrawHistory() {
+  openSheet('<div class="loader"><span class="spin"></span></div>');
+  try {
+    const items = await API.get('/withdrawals');
+    openSheet(`<div class="sheet-title">Заявки на вывод</div>${items.length
+      ? '<div class="list-group">' + items.map((w) => `<div class="ios-row">
+          <span class="ios-ic ${w.status === 'approved' ? '' : 'gray'}">${ic(w.status === 'approved' ? 'check-lg' : w.status === 'rejected' ? 'x-lg' : 'hourglass-split')}</span>
+          <span class="label">${money(w.amount)}<div class="text-hint" style="font-size:12px">${new Date(w.created_at).toLocaleString('ru-RU')}</div></span>
+          <span class="trailing">${WD_STATUS[w.status] || w.status}</span></div>`).join('') + '</div>'
+      : emptyState('cash-stack', 'Заявок на вывод нет')}`);
+  } catch (e) { openSheet(emptyState('exclamation-triangle', e.message)); }
+}
+
+const TX_LABEL = { deposit: 'Пополнение', hold: 'Оплата сделки', release: 'Зачисление за сделку', refund: 'Возврат по сделке', withdraw_hold: 'Заявка на вывод', withdraw_refund: 'Возврат вывода', withdraw_done: 'Корректировка' };
+async function openHistorySheet() {
+  openSheet('<div class="loader"><span class="spin"></span></div>');
+  try {
+    const items = await API.get('/transactions');
+    openSheet(`<div class="sheet-title">История операций</div>${items.length
+      ? '<div class="list-group">' + items.map((t) => {
+          const pos = t.amount >= 0;
+          return `<div class="ios-row">
+            <span class="ios-ic ${pos ? '' : 'gray'}">${ic(pos ? 'arrow-down-left' : 'arrow-up-right')}</span>
+            <span class="label">${esc(TX_LABEL[t.type] || t.type)}<div class="text-hint" style="font-size:12px">${esc(t.note || '')}</div></span>
+            <span class="trailing" style="color:${pos ? 'var(--green)' : 'var(--text)'}">${pos ? '+' : ''}${money(t.amount)}</span></div>`;
+        }).join('') + '</div>'
+      : emptyState('clock-history', 'Операций пока нет')}`);
+  } catch (e) { openSheet(emptyState('exclamation-triangle', e.message)); }
 }
 
 function myProductCard(p, i) {

@@ -5,8 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
 import { api } from './api.js';
 import { createBot, setupMenuButton } from './bot.js';
-import './db.js'; // инициализация схемы БД
+import { processDealTimeouts } from './db.js'; // + инициализация схемы БД
 import { seedDemo } from './seed.js';
+import { setBot, notifyUser } from './notify.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '..', 'public');
@@ -61,6 +62,7 @@ app.listen(config.port, () => {
 
 // Telegram-бот (long polling)
 const bot = createBot();
+setBot(bot); // для уведомлений (если бота нет — уведомления просто игнорируются)
 if (bot) {
   bot
     .start({
@@ -81,6 +83,28 @@ if (bot) {
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
 }
+
+// Фоновая обработка дедлайнов сделок (автоотмена/автозавершение) каждую минуту
+function runDealTimeouts() {
+  try {
+    const events = processDealTimeouts();
+    for (const e of events) {
+      const d = e.deal;
+      if (!d) continue;
+      if (e.type === 'auto_cancel') {
+        notifyUser(d.buyer_id, `⏱ Продавец не подтвердил сделку по «${d.title}» за 24 часа. Сделка отменена, средства возвращены на баланс.`);
+        notifyUser(d.seller_id, `⏱ Вы не подтвердили сделку по «${d.title}» за 24 часа. Сделка отменена, рейтинг снижен.`);
+      } else if (e.type === 'auto_complete') {
+        notifyUser(d.seller_id, `⏱ Покупатель не подтвердил получение за 7 дней — сделка по «${d.title}» завершена автоматически. На баланс зачислено.`);
+        notifyUser(d.buyer_id, `⏱ Сделка по «${d.title}» автоматически завершена (7 дней на проверке истекли).`);
+      }
+    }
+  } catch (e) {
+    console.error('Ошибка обработки дедлайнов сделок:', e);
+  }
+}
+setInterval(runDealTimeouts, 60 * 1000);
+runDealTimeouts();
 
 // Подстраховка: не позволяем необработанным промисам ронять процесс
 process.on('unhandledRejection', (reason) => {
