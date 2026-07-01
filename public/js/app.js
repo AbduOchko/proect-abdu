@@ -397,7 +397,7 @@ function productCard(p, index) {
   if (p.status && p.status !== 'active') tags += `<span class="tag more">${statusProductLabel(p.status)}</span>`;
   const delay = Math.min((index || 0) * 45, 420);
   return `<div class="pcard" data-id="${p.id}" style="--c1:${g[0]};--c2:${g[1]};--d:${delay}ms">
-    <div class="pcard-av">${ic(c.icon)}</div>
+    <div class="pcard-av">${p.avatar ? `<img src="${esc(p.avatar)}" alt="">` : ic(c.icon)}</div>
     <div class="pcard-main">
       <div class="pcard-title">${esc(p.title)}</div>
       ${specs ? `<div class="pcard-specs">${specs}</div>` : ''}
@@ -478,7 +478,10 @@ function renderProductPage(p) {
         <span class="hero-chip">${ic(c.icon)} ${esc(c.title)}</span>
         ${p.status !== 'active' ? `<span class="hero-chip">${statusProductLabel(p.status)}</span>` : ''}
       </div>
-      <div class="pp-hero-price">${money(p.price)}</div>
+      <div class="pp-hero-bottom">
+        <div class="pp-hero-av">${p.avatar ? `<img src="${esc(p.avatar)}" alt="">` : ic(c.icon)}</div>
+        <div class="pp-hero-price">${money(p.price)}</div>
+      </div>
     </div>
     <div class="pp-title">${esc(p.title)}</div>
     <div class="mini-stats">
@@ -553,9 +556,20 @@ async function buyProduct(p) {
 function openProductForm() {
   const genresSel = new Set();
   const shots = [];
+  let avatarUrl = '';
   openSheet(`
     <div class="sheet-title">Новый товар</div>
     <div class="field"><label>Категория</label><select id="f-cat">${CATEGORIES.map((c) => `<option value="${c.key}">${c.title}</option>`).join('')}</select></div>
+    <div class="field"><label>Аватар товара</label>
+      <div class="avatar-upload">
+        <div class="avatar-preview" id="f-av-prev"></div>
+        <div class="avatar-upload-actions">
+          <label class="upload-btn" for="f-av-file">${ic('image')} Загрузить фото</label>
+          <button type="button" class="btn-link" id="f-av-rm" hidden>Убрать</button>
+        </div>
+        <input id="f-av-file" type="file" accept="image/*" hidden>
+      </div>
+    </div>
     <div class="field"><label>Название</label><input id="f-title" maxlength="120" placeholder="Напр. Telegram-канал 50к подписчиков"></div>
     <div id="f-channel"></div>
     <div class="field"><label>Описание</label><textarea id="f-desc" maxlength="4000" placeholder="Расскажите о товаре, условиях передачи и т.д."></textarea></div>
@@ -564,6 +578,28 @@ function openProductForm() {
 
   const catSel = document.getElementById('f-cat');
   const chanBox = document.getElementById('f-channel');
+
+  // --- аватар товара ---
+  const avPrev = document.getElementById('f-av-prev');
+  const avRm = document.getElementById('f-av-rm');
+  const avFile = document.getElementById('f-av-file');
+  function renderAvatar() {
+    const g = catGrad(catSel.value);
+    avPrev.style.setProperty('--c1', g[0]);
+    avPrev.style.setProperty('--c2', g[1]);
+    avPrev.innerHTML = avatarUrl ? `<img src="${esc(avatarUrl)}" alt="">` : ic(catByKey(catSel.value).icon);
+    avRm.hidden = !avatarUrl;
+  }
+  avFile.addEventListener('change', async () => {
+    const file = avFile.files && avFile.files[0];
+    avFile.value = '';
+    if (!file) return;
+    try {
+      const { url } = await API.post('/upload', { image: await compressImage(file, 400, 0.82) });
+      avatarUrl = url; renderAvatar(); haptic('success');
+    } catch (e) { toast('Не удалось загрузить изображение'); }
+  });
+  avRm.addEventListener('click', () => { avatarUrl = ''; renderAvatar(); });
 
   const shotsPreview = () => shots.map((u, i) =>
     `<div class="shot-thumb"><img src="${esc(u)}"><button type="button" class="shot-rm" data-rm="${i}">${ic('x-lg')}</button></div>`).join('');
@@ -610,8 +646,9 @@ function openProductForm() {
       }
     });
   }
-  catSel.addEventListener('change', renderChannel);
+  catSel.addEventListener('change', () => { renderChannel(); renderAvatar(); });
   renderChannel();
+  renderAvatar();
 
   document.getElementById('f-submit').addEventListener('click', async () => {
     const category = catSel.value;
@@ -620,6 +657,7 @@ function openProductForm() {
       title: document.getElementById('f-title').value.trim(),
       description: document.getElementById('f-desc').value.trim(),
       price: Number(document.getElementById('f-price').value) || 0,
+      avatar: avatarUrl,
     };
     if (category === 'channel') {
       body.genres = [...genresSel];

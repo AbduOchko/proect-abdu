@@ -91,6 +91,7 @@ api.post('/products', (req, res) => {
     ? req.body.genres.map((g) => str(g, 30)).filter(Boolean).slice(0, 12) : [];
   const screenshots = isChannel && Array.isArray(req.body.screenshots)
     ? req.body.screenshots.filter((u) => typeof u === 'string' && u.startsWith('/uploads/')).slice(0, 8) : [];
+  const avatar = typeof req.body.avatar === 'string' && req.body.avatar.startsWith('/uploads/') ? req.body.avatar : '';
   const p = db.createProduct({
     seller_id: req.user.id, category, title, description, price,
     genres,
@@ -98,6 +99,7 @@ api.post('/products', (req, res) => {
     reach24: isChannel ? Math.max(0, num(req.body.reach24)) : 0,
     avg_age: isChannel ? str(req.body.avg_age, 40) : '',
     screenshots,
+    avatar,
   });
   res.status(201).json(p);
 });

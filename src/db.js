@@ -109,6 +109,7 @@ ensureColumn('products', 'subscribers', 'INTEGER DEFAULT 0');    // подпис
 ensureColumn('products', 'reach24', 'INTEGER DEFAULT 0');        // охват поста за 24ч
 ensureColumn('products', 'avg_age', "TEXT DEFAULT ''");          // средний возраст аудитории
 ensureColumn('products', 'screenshots', "TEXT DEFAULT '[]'");    // скриншоты статистики (JSON-массив URL)
+ensureColumn('products', 'avatar', "TEXT DEFAULT ''");           // аватар/логотип товара (URL)
 
 const now = () => Date.now();
 
@@ -190,17 +191,18 @@ export function listUsers({ q = '', limit = 50, offset = 0 } = {}) {
 }
 
 // ================= PRODUCTS =================
-export function createProduct({ seller_id, category, title, description, price, genres, subscribers, reach24, avg_age, screenshots }) {
+export function createProduct({ seller_id, category, title, description, price, genres, subscribers, reach24, avg_age, screenshots, avatar }) {
   const info = db
     .prepare(
-      `INSERT INTO products (seller_id, category, title, description, price, genres, subscribers, reach24, avg_age, screenshots, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO products (seller_id, category, title, description, price, genres, subscribers, reach24, avg_age, screenshots, avatar, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
     )
     .run(
       Number(seller_id), category, title, description || '', Number(price) || 0,
       JSON.stringify(Array.isArray(genres) ? genres.slice(0, 12) : []),
       Number(subscribers) || 0, Number(reach24) || 0, String(avg_age || '').slice(0, 40),
       JSON.stringify(Array.isArray(screenshots) ? screenshots.slice(0, 8) : []),
+      String(avatar || ''),
       now()
     );
   return getProduct(info.lastInsertRowid);
