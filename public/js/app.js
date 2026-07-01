@@ -37,6 +37,25 @@ const CATEGORIES = [
 ];
 const catByKey = (k) => CATEGORIES.find((c) => c.key === k) || { title: k, icon: 'box-seam' };
 
+// Цветные градиенты обложек по категориям
+const CAT_GRAD = {
+  channel: ['#3b82f6', '#1d4ed8'],
+  bot: ['#14b8a6', '#0f766e'],
+  script: ['#8b5cf6', '#6d28d9'],
+  chat: ['#10b981', '#047857'],
+  code: ['#f59e0b', '#b45309'],
+  other: ['#64748b', '#334155'],
+};
+const catGrad = (k) => CAT_GRAD[k] || CAT_GRAD.other;
+
+const SORTS = [
+  { v: 'new', l: 'Сначала новые', i: 'clock-history' },
+  { v: 'cheap', l: 'Сначала дешёвые', i: 'sort-numeric-down' },
+  { v: 'expensive', l: 'Сначала дорогие', i: 'sort-numeric-up-alt' },
+  { v: 'popular', l: 'Популярные', i: 'fire' },
+];
+const sortShort = { new: 'Новые', cheap: 'Дешевле', expensive: 'Дороже', popular: 'Популярные' };
+
 const DEAL_STATUS = { pending: 'Ожидание', paid: 'Оплачено', completed: 'Завершена', cancelled: 'Отменена', disputed: 'Спор' };
 const DEAL_ICON = { pending: 'hourglass-split', paid: 'credit-card', completed: 'check-circle-fill', cancelled: 'x-circle', disputed: 'exclamation-triangle' };
 
@@ -53,7 +72,7 @@ const toastEl = document.getElementById('toast');
 const state = {
   tab: 'catalog',
   me: null,
-  catalog: { category: '', q: '', sort: 'new' },
+  catalog: { category: '', q: '', sort: 'new', minPrice: '', maxPrice: '' },
   exchange: { category: '', q: '' },
   deals: { role: 'all' },
 };
@@ -209,29 +228,49 @@ function categoryChips(active) {
   return html + '</div>';
 }
 
+function skeletonGrid() {
+  const one = `<div class="pcard skeleton"><div class="pcard-cover"></div><div class="pcard-body"><div class="skel skel-1"></div><div class="skel skel-2"></div><div class="skel skel-3"></div></div></div>`;
+  return `<div class="pgrid">${one.repeat(6)}</div>`;
+}
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+}
+
 async function renderCatalog() {
   topTitle.textContent = 'Каталог';
   setAddButton(openProductForm);
   const s = state.catalog;
+  const hasPrice = s.minPrice !== '' || s.maxPrice !== '';
   viewEl.innerHTML = `
-    <div class="searchbar">${ic('search')}<input id="cat-search" placeholder="Поиск товаров" value="${esc(s.q)}"></div>
-    ${categoryChips(s.category)}
-    <div class="row-between">
-      <span class="text-hint" id="cat-count"></span>
-      <select class="select-sort" id="cat-sort">
-        <option value="new">Сначала новые</option>
-        <option value="cheap">Сначала дешёвые</option>
-        <option value="expensive">Сначала дорогие</option>
-        <option value="popular">Популярные</option>
-      </select>
+    <div class="searchbar" id="cat-sb">
+      ${ic('search')}
+      <input id="cat-search" placeholder="Поиск товаров" value="${esc(s.q)}">
+      <button class="sb-clear ${s.q ? '' : 'hidden'}" id="cat-clear" aria-label="Очистить">${ic('x-circle-fill')}</button>
     </div>
-    <div id="cat-list"><div class="loader"><span class="spin"></span></div></div>`;
-  document.getElementById('cat-sort').value = s.sort;
+    ${categoryChips(s.category)}
+    <div class="toolbar">
+      <span class="text-hint" id="cat-count"></span>
+      <div class="toolbar-actions">
+        <button class="pill-btn" id="cat-sort-btn">${ic('arrow-down-up')} <span id="cat-sort-lb">${sortShort[s.sort]}</span></button>
+        <button class="pill-btn ${hasPrice ? 'active' : ''}" id="cat-filter-btn">${ic('sliders2')} Фильтр</button>
+      </div>
+    </div>
+    <div id="cat-list">${skeletonGrid()}</div>`;
+
   document.querySelectorAll('#view .chip').forEach((ch) =>
     ch.addEventListener('click', () => { s.category = ch.dataset.cat; renderCatalog(); }));
+
   const searchInput = document.getElementById('cat-search');
+  const clearBtn = document.getElementById('cat-clear');
+  searchInput.addEventListener('input', () => clearBtn.classList.toggle('hidden', !searchInput.value));
   searchInput.addEventListener('input', debounce(() => { s.q = searchInput.value.trim(); loadCatalogList(); }, 350));
-  document.getElementById('cat-sort').addEventListener('change', (e) => { s.sort = e.target.value; loadCatalogList(); });
+  clearBtn.addEventListener('click', () => { searchInput.value = ''; s.q = ''; clearBtn.classList.add('hidden'); loadCatalogList(); });
+
+  document.getElementById('cat-sort-btn').addEventListener('click', openSortSheet);
+  document.getElementById('cat-filter-btn').addEventListener('click', openFilterSheet);
   loadCatalogList();
 }
 
@@ -244,30 +283,80 @@ async function loadCatalogList() {
     if (s.category) qs.set('category', s.category);
     if (s.q) qs.set('q', s.q);
     if (s.sort) qs.set('sort', s.sort);
+    if (s.minPrice !== '') qs.set('minPrice', s.minPrice);
+    if (s.maxPrice !== '') qs.set('maxPrice', s.maxPrice);
     const items = await API.get('/products?' + qs.toString());
     const countEl = document.getElementById('cat-count');
-    if (countEl) countEl.textContent = items.length ? `${items.length} товаров` : '';
-    if (!items.length) { list.innerHTML = emptyState('bag', 'Пока нет товаров\nв этой категории'); return; }
-    list.innerHTML = items.map(productCard).join('');
-    list.querySelectorAll('.card').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
+    if (countEl) countEl.textContent = items.length
+      ? `${items.length} ${plural(items.length, 'товар', 'товара', 'товаров')}`
+      : 'Ничего не найдено';
+    if (!items.length) { list.innerHTML = emptyState('bag', 'По вашему запросу\nничего не найдено'); return; }
+    list.innerHTML = `<div class="pgrid">${items.map(productCard).join('')}</div>`;
+    list.querySelectorAll('.pcard').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
   } catch (e) { list.innerHTML = emptyState('exclamation-triangle', e.message || 'Не удалось загрузить'); }
+}
+
+function openSortSheet() {
+  const cur = state.catalog.sort;
+  openSheet(`<div class="sheet-title">Сортировка</div>
+    <div class="list-group">${SORTS.map((o) => `
+      <button class="ios-row" data-sort="${o.v}">
+        <span class="ios-ic">${ic(o.i)}</span>
+        <span class="label">${o.l}</span>
+        ${cur === o.v ? `<span class="sc-check">${ic('check-lg')}</span>` : ''}
+      </button>`).join('')}</div>`);
+  sheetBody.querySelectorAll('[data-sort]').forEach((b) =>
+    b.addEventListener('click', () => {
+      state.catalog.sort = b.dataset.sort;
+      const lb = document.getElementById('cat-sort-lb'); if (lb) lb.textContent = sortShort[b.dataset.sort];
+      haptic('light'); closeSheet(); loadCatalogList();
+    }));
+}
+
+function openFilterSheet() {
+  const s = state.catalog;
+  openSheet(`<div class="sheet-title">Фильтр по цене</div>
+    <div class="field"><label>Диапазон цены, ₽</label>
+      <div class="range-row">
+        <input id="flt-min" type="number" inputmode="numeric" min="0" placeholder="от" value="${s.minPrice}">
+        <span class="range-dash">—</span>
+        <input id="flt-max" type="number" inputmode="numeric" min="0" placeholder="до" value="${s.maxPrice}">
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="flt-reset">${ic('arrow-counterclockwise')} Сбросить</button>
+      <button class="btn" id="flt-apply">${ic('check-lg')} Применить</button>
+    </div>`);
+  document.getElementById('flt-apply').addEventListener('click', () => {
+    const mn = document.getElementById('flt-min').value.trim();
+    const mx = document.getElementById('flt-max').value.trim();
+    s.minPrice = mn === '' ? '' : Math.max(0, Number(mn) || 0);
+    s.maxPrice = mx === '' ? '' : Math.max(0, Number(mx) || 0);
+    haptic('light'); closeSheet(); renderCatalog();
+  });
+  document.getElementById('flt-reset').addEventListener('click', () => {
+    s.minPrice = ''; s.maxPrice = ''; closeSheet(); renderCatalog();
+  });
 }
 
 function productCard(p) {
   const c = catByKey(p.category);
+  const g = catGrad(p.category);
   const seller = { first_name: p.seller_name, username: p.seller_username, photo_url: p.seller_photo };
-  return `<div class="card" data-id="${p.id}">
-    <div class="card-top">
-      <div style="min-width:0">
-        <div class="card-title">${esc(p.title)}</div>
-        <span class="badge cat">${ic(c.icon)} ${esc(c.title)}</span>
+  const meta = Number(p.seller_rating) > 0
+    ? `<span class="pcard-rate">${ic('star-fill')} ${Number(p.seller_rating).toFixed(1)}</span>`
+    : `<span class="pcard-rate">${ic('eye')} ${p.views || 0}</span>`;
+  const ribbon = p.status && p.status !== 'active' ? `<span class="pcard-ribbon">${statusProductLabel(p.status)}</span>` : '';
+  return `<div class="pcard" data-id="${p.id}">
+    <div class="pcard-cover" style="--c1:${g[0]};--c2:${g[1]}">${ribbon}${ic(c.icon, 'pcard-cover-ic')}</div>
+    <div class="pcard-body">
+      <div class="pcard-cat">${ic(c.icon)} ${esc(c.title)}</div>
+      <div class="pcard-title">${esc(p.title)}</div>
+      <div class="pcard-price">${money(p.price)}</div>
+      <div class="pcard-seller">
+        <span class="pcard-seller-l">${avatarHtml(seller, 'xs')}<span class="pcard-seller-n">${userName(seller)}</span></span>
+        ${meta}
       </div>
-      <div class="price">${money(p.price)}</div>
-    </div>
-    ${p.description ? `<div class="card-desc">${esc(p.description)}</div>` : ''}
-    <div class="card-foot">
-      <div class="mini-user">${avatarHtml(seller)} ${userName(seller)}</div>
-      <span class="muted-ic">${ic('eye')} ${p.views || 0}</span>
     </div>
   </div>`;
 }
@@ -277,34 +366,46 @@ async function openProductDetail(id) {
   try {
     const p = await API.get('/products/' + id);
     const c = catByKey(p.category);
+    const g = catGrad(p.category);
     const mine = state.me && p.seller_id === state.me.id;
     const seller = { first_name: p.seller_name, username: p.seller_username, photo_url: p.seller_photo };
     let actions;
     if (mine) {
       actions = `<div class="btn-row">
-        <button class="btn secondary sm" data-act="toggle">${ic(p.status === 'active' ? 'eye-slash' : 'eye')} ${p.status === 'active' ? 'Скрыть' : 'Опубликовать'}</button>
-        <button class="btn danger sm" data-act="del">${ic('trash')} Удалить</button></div>`;
+        <button class="btn secondary" data-act="toggle">${ic(p.status === 'active' ? 'eye-slash' : 'eye')} ${p.status === 'active' ? 'Скрыть' : 'Опубликовать'}</button>
+        <button class="btn danger" data-act="del">${ic('trash')} Удалить</button></div>`;
     } else {
-      actions = `<button class="btn" data-act="buy">${ic('bag-check')} Купить за ${money(p.price)}</button>
+      const off = p.status !== 'active';
+      actions = `<button class="btn" data-act="buy"${off ? ' disabled' : ''}>${ic('bag-check')} ${off ? 'Товар недоступен' : 'Купить · ' + money(p.price)}</button>
         <button class="btn secondary mt8" data-act="chat">${ic('chat-dots')} Написать продавцу</button>`;
     }
     openSheet(`
-      <div class="sheet-title">${esc(p.title)}</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <span class="badge cat">${ic(c.icon)} ${esc(c.title)}</span>
-        <span class="st st-${p.status}">${statusProductLabel(p.status)}</span>
+      <div class="detail-hero" style="--c1:${g[0]};--c2:${g[1]}">
+        ${ic(c.icon, 'detail-hero-ic')}
+        <div class="hero-chips">
+          <span class="hero-chip">${ic(c.icon)} ${esc(c.title)}</span>
+          ${p.status !== 'active' ? `<span class="hero-chip">${statusProductLabel(p.status)}</span>` : ''}
+        </div>
+        <div class="hero-price">${money(p.price)}</div>
       </div>
-      <div class="detail-desc">${esc(p.description) || '<span class="text-hint">Без описания</span>'}</div>
-      <div class="list-group">
-        <div class="ios-row"><span class="label">Цена</span><span class="trailing">${money(p.price)}</span></div>
-        <div class="ios-row"><span class="label">Просмотры</span><span class="trailing">${p.views || 0}</span></div>
-        <div class="ios-row"><span class="label">Продавец</span><span class="trailing">${avatarHtml(seller)} ${userName(seller)}</span></div>
-        <div class="ios-row"><span class="label">Рейтинг</span><span class="trailing">${stars(p.seller_rating)}</span></div>
-        <div class="ios-row"><span class="label">Сделок у продавца</span><span class="trailing">${p.seller_deals || 0}</span></div>
+      <div class="sheet-title" style="margin-top:16px">${esc(p.title)}</div>
+      ${p.description ? `<div class="detail-desc">${esc(p.description)}</div>` : '<div class="text-hint mb12">Без описания</div>'}
+      <div class="seller-card${mine ? '' : ' tappable'}">
+        ${avatarHtml(seller, 'md')}
+        <div class="sc-main">
+          <div class="sc-name">${userName(seller)}${mine ? ' <span class="text-hint">(вы)</span>' : ''}</div>
+          <div class="sc-sub">${stars(p.seller_rating)} · ${p.seller_deals || 0} ${plural(p.seller_deals || 0, 'сделка', 'сделки', 'сделок')}</div>
+        </div>
+        ${mine ? '' : `<span class="sc-chev">${ic('chevron-right')}</span>`}
       </div>
-      <div class="mt12">${actions}</div>`);
-    sheetBody.querySelector('[data-act="buy"]')?.addEventListener('click', () => buyProduct(p));
+      <div class="mini-stats">
+        <span class="mini-stat">${ic('eye')} ${p.views || 0} просмотров</span>
+        <span class="mini-stat">${ic('clock')} ${timeAgo(p.created_at)}</span>
+      </div>
+      <div class="sheet-actions">${actions}</div>`);
+    sheetBody.querySelector('[data-act="buy"]')?.addEventListener('click', () => { if (p.status === 'active') buyProduct(p); });
     sheetBody.querySelector('[data-act="chat"]')?.addEventListener('click', () => startChat(p.seller_id, p.id));
+    if (!mine) sheetBody.querySelector('.seller-card')?.addEventListener('click', () => startChat(p.seller_id, p.id));
     sheetBody.querySelector('[data-act="toggle"]')?.addEventListener('click', async () => {
       await API.patch(`/products/${p.id}/status`, { status: p.status === 'active' ? 'hidden' : 'active' });
       toast('Готово'); closeSheet(); loadCatalogList();
@@ -725,8 +826,8 @@ async function openMyProducts() {
   openSheet('<div class="loader"><span class="spin"></span></div>');
   try {
     const items = await API.get('/products/mine');
-    openSheet(`<div class="sheet-title">Мои товары</div>${items.length ? items.map(productCard).join('') : emptyState('bag', 'У вас нет товаров')}`);
-    sheetBody.querySelectorAll('.card').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
+    openSheet(`<div class="sheet-title">Мои товары</div>${items.length ? '<div class="pgrid">' + items.map(productCard).join('') + '</div>' : emptyState('bag', 'У вас нет товаров')}`);
+    sheetBody.querySelectorAll('.pcard').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
   } catch (e) { openSheet(emptyState('exclamation-triangle', e.message)); }
 }
 async function openMyRequests() {

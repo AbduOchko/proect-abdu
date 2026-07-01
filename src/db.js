@@ -13,6 +13,10 @@ export const db = new Database(config.dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+// Unicode-aware нижний регистр (SQLite LIKE/LOWER не работают с кириллицей).
+// Используется для регистронезависимого поиска.
+db.function('lower_u', { deterministic: true }, (s) => (s == null ? '' : String(s).toLowerCase()));
+
 // ---- Схема ----
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
@@ -159,7 +163,7 @@ export function listUsers({ q = '', limit = 50, offset = 0 } = {}) {
   return db
     .prepare(
       `SELECT * FROM users
-       WHERE (? = '' OR username LIKE ? OR first_name LIKE ? OR CAST(id AS TEXT) LIKE ?)
+       WHERE (? = '' OR lower_u(username) LIKE lower_u(?) OR lower_u(first_name) LIKE lower_u(?) OR CAST(id AS TEXT) LIKE ?)
        ORDER BY created_at DESC LIMIT ? OFFSET ?`
     )
     .all(q, like, like, like, limit, offset)
@@ -188,13 +192,15 @@ export function getProduct(id) {
   return db.prepare(`${productSelect} WHERE p.id = ?`).get(Number(id));
 }
 
-export function listProducts({ category, q = '', sellerId, status = 'active', sort = 'new', limit = 50, offset = 0 } = {}) {
+export function listProducts({ category, q = '', sellerId, status = 'active', sort = 'new', minPrice, maxPrice, limit = 50, offset = 0 } = {}) {
   const clauses = [];
   const params = [];
   if (status && status !== 'all') { clauses.push('p.status = ?'); params.push(status); }
   if (category) { clauses.push('p.category = ?'); params.push(category); }
   if (sellerId) { clauses.push('p.seller_id = ?'); params.push(Number(sellerId)); }
-  if (q) { clauses.push('(p.title LIKE ? OR p.description LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
+  if (q) { clauses.push('(lower_u(p.title) LIKE lower_u(?) OR lower_u(p.description) LIKE lower_u(?))'); params.push(`%${q}%`, `%${q}%`); }
+  if (minPrice != null && minPrice !== '') { clauses.push('p.price >= ?'); params.push(Number(minPrice)); }
+  if (maxPrice != null && maxPrice !== '') { clauses.push('p.price <= ?'); params.push(Number(maxPrice)); }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   let order = 'p.created_at DESC';
   if (sort === 'cheap') order = 'p.price ASC';
@@ -243,7 +249,7 @@ export function listRequests({ category, q = '', buyerId, status = 'active', lim
   if (status && status !== 'all') { clauses.push('r.status = ?'); params.push(status); }
   if (category) { clauses.push('r.category = ?'); params.push(category); }
   if (buyerId) { clauses.push('r.buyer_id = ?'); params.push(Number(buyerId)); }
-  if (q) { clauses.push('(r.title LIKE ? OR r.description LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
+  if (q) { clauses.push('(lower_u(r.title) LIKE lower_u(?) OR lower_u(r.description) LIKE lower_u(?))'); params.push(`%${q}%`, `%${q}%`); }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   params.push(limit, offset);
   return db.prepare(`${requestSelect} ${where} ORDER BY r.created_at DESC LIMIT ? OFFSET ?`).all(...params);

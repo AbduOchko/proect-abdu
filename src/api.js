@@ -54,6 +54,8 @@ api.get('/products', (req, res) => {
     q: str(q, 100),
     sort: str(sort, 20) || 'new',
     sellerId: sellerId ? num(sellerId) : undefined,
+    minPrice: req.query.minPrice != null && req.query.minPrice !== '' ? num(req.query.minPrice) : undefined,
+    maxPrice: req.query.maxPrice != null && req.query.maxPrice !== '' ? num(req.query.maxPrice) : undefined,
     status: 'active',
     limit: Math.min(num(req.query.limit) || 50, 100),
     offset: num(req.query.offset),
