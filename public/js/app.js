@@ -9,6 +9,16 @@ if (tg) {
 }
 
 /* ---------- theme (white/black + dark green) ---------- */
+// Пользователь может выбрать тему вручную в профиле: 'auto' | 'light' | 'dark'.
+// Выбор сохраняется на устройстве (localStorage) и переживает перезапуск приложения.
+const THEME_KEY = 'market_theme_pref';
+function getThemePref() {
+  try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { return 'auto'; }
+}
+function systemScheme() {
+  return (tg && tg.colorScheme) ||
+    (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+}
 function applyTheme(scheme) {
   const dark = scheme === 'dark';
   document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
@@ -16,13 +26,24 @@ function applyTheme(scheme) {
   try { tg && tg.setBackgroundColor && tg.setBackgroundColor(bg); } catch (e) {}
   try { tg && tg.setHeaderColor && tg.setHeaderColor(bg); } catch (e) {}
 }
+function resolveAndApplyTheme() {
+  const pref = getThemePref();
+  applyTheme(pref === 'auto' ? systemScheme() : pref);
+}
+function setThemePref(pref) {
+  try { localStorage.setItem(THEME_KEY, pref); } catch (e) {}
+  resolveAndApplyTheme();
+}
 function initTheme() {
-  const scheme = (tg && tg.colorScheme) ||
-    (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-  applyTheme(scheme);
-  if (tg && tg.onEvent) tg.onEvent('themeChanged', () => applyTheme(tg.colorScheme));
+  resolveAndApplyTheme();
+  if (tg && tg.onEvent) tg.onEvent('themeChanged', () => { if (getThemePref() === 'auto') applyTheme(systemScheme()); });
 }
 initTheme();
+function paintThemeSeg() {
+  const cur = getThemePref();
+  document.querySelectorAll('#pf-theme [data-theme-pref]').forEach((b) =>
+    b.classList.toggle('active', b.dataset.themePref === cur));
+}
 
 /* ---------- icons ---------- */
 function ic(name, cls) { return `<i class="bi bi-${name}${cls ? ' ' + cls : ''}"></i>`; }
@@ -1167,6 +1188,13 @@ async function renderProfile() {
         <button class="balance-history" id="pf-history">${ic('clock-history')} История операций</button>
       </div>
 
+      <div class="section-label">Оформление</div>
+      <div class="seg seg-theme" id="pf-theme">
+        <button data-theme-pref="auto">${ic('phone')}<span>Авто</span></button>
+        <button data-theme-pref="light">${ic('sun')}<span>Светлая</span></button>
+        <button data-theme-pref="dark">${ic('moon-stars')}<span>Тёмная</span></button>
+      </div>
+
       <div class="section-label">О себе</div>
       <div class="field mt8"><textarea id="pf-bio" maxlength="500" placeholder="Расскажите о себе">${esc(me.bio || '')}</textarea></div>
       <button class="btn secondary sm" id="pf-save-bio">${ic('check-lg')} Сохранить</button>
@@ -1191,6 +1219,9 @@ async function renderProfile() {
     });
     document.getElementById('pf-products').addEventListener('click', openMyProducts);
     document.getElementById('pf-requests').addEventListener('click', openMyRequests);
+    paintThemeSeg();
+    document.querySelectorAll('#pf-theme [data-theme-pref]').forEach((b) =>
+      b.addEventListener('click', () => { setThemePref(b.dataset.themePref); paintThemeSeg(); haptic('light'); }));
     document.getElementById('pf-topup').addEventListener('click', openTopupSheet);
     document.getElementById('pf-withdraw').addEventListener('click', openWithdrawSheet);
     document.getElementById('pf-history').addEventListener('click', openHistorySheet);

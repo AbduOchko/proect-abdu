@@ -3,6 +3,10 @@
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 if (tg) { tg.ready(); tg.expand(); }
 
+// Тема синхронизирована с выбором пользователя в профиле Mini App (тот же ключ localStorage)
+const THEME_KEY = 'market_theme_pref';
+function getThemePref() { try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { return 'auto'; } }
+function systemScheme() { return (tg && tg.colorScheme) || (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
 function applyTheme(scheme) {
   const dark = scheme === 'dark';
   document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
@@ -11,9 +15,9 @@ function applyTheme(scheme) {
   try { tg && tg.setHeaderColor && tg.setHeaderColor(bg); } catch (e) {}
 }
 (function initTheme() {
-  const scheme = (tg && tg.colorScheme) || (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-  applyTheme(scheme);
-  if (tg && tg.onEvent) tg.onEvent('themeChanged', () => applyTheme(tg.colorScheme));
+  const pref = getThemePref();
+  applyTheme(pref === 'auto' ? systemScheme() : pref);
+  if (tg && tg.onEvent) tg.onEvent('themeChanged', () => { if (getThemePref() === 'auto') applyTheme(systemScheme()); });
 })();
 
 function ic(name, cls) { return `<i class="bi bi-${name}${cls ? ' ' + cls : ''}"></i>`; }
