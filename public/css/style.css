@@ -325,7 +325,7 @@ input, textarea, select { font-family: inherit; font-size: 16px; color: inherit;
 
 /* ===== Bottom sheet / modal ===== */
 #sheet-overlay {
-  position: fixed; inset: 0; z-index: 50;
+  position: fixed; inset: 0; z-index: 80;
   background: rgba(0, 0, 0, 0.4); display: flex; align-items: flex-end;
   animation: fade .22s ease;
 }
@@ -390,7 +390,7 @@ input, textarea, select { font-family: inherit; font-size: 16px; color: inherit;
 #toast {
   position: fixed; bottom: calc(var(--tabbar-h) + var(--tabbar-gap) + env(safe-area-inset-bottom) + 26px); left: 50%; transform: translateX(-50%);
   background: rgba(20, 20, 22, 0.94); color: #fff; padding: 13px 20px; border-radius: 14px;
-  font-size: 14.5px; font-weight: 500; z-index: 100; max-width: 88%; text-align: center;
+  font-size: 14.5px; font-weight: 500; z-index: 110; max-width: 88%; text-align: center;
   -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3); animation: toastin .25s ease;
 }
@@ -438,8 +438,8 @@ input, textarea, select { font-family: inherit; font-size: 16px; color: inherit;
 .pcard-av img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
 .pcard-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .pcard-title { font-size: 15.5px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.pcard-specs { font-size: 12.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
-.pcard-specs .bi { font-size: 12px; opacity: .8; }
+.pcard-specs { font-size: 12.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pcard-specs .bi { font-size: 12px; opacity: .8; margin-right: 2px; }
 .pcard-tags { display: flex; gap: 5px; overflow: hidden; margin-top: 1px; }
 .tag { background: var(--fill); color: var(--text-2); font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 7px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
 .tag .bi { font-size: 11px; }
@@ -507,7 +507,7 @@ input, textarea, select { font-family: inherit; font-size: 16px; color: inherit;
 .pp-shots::-webkit-scrollbar { display: none; }
 .pp-shot { height: 160px; border-radius: 12px; object-fit: cover; box-shadow: var(--shadow-sm); flex-shrink: 0; }
 
-#lightbox { position: fixed; inset: 0; z-index: 70; background: rgba(0, 0, 0, 0.92); display: flex; align-items: center; justify-content: center; padding: 20px; animation: fade .2s; }
+#lightbox { position: fixed; inset: 0; z-index: 90; background: rgba(0, 0, 0, 0.92); display: flex; align-items: center; justify-content: center; padding: 20px; animation: fade .2s; }
 #lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
 #lightbox .lb-close { position: absolute; top: calc(env(safe-area-inset-top) + 14px); right: 16px; background: rgba(255, 255, 255, 0.16); border: none; color: #fff; width: 38px; height: 38px; border-radius: 50%; font-size: 18px; }
 

@@ -216,7 +216,7 @@ export function setBanned(id, banned) {
 }
 
 export function addRating(userId, stars) {
-  const s = Math.max(1, Math.min(5, Number(stars) || 0));
+  const s = Math.round(Math.max(1, Math.min(5, Number(stars) || 0)));
   db.prepare('UPDATE users SET rating_sum = rating_sum + ?, rating_count = rating_count + 1 WHERE id=?').run(
     s,
     Number(userId)
@@ -523,7 +523,11 @@ export function createEscrowDeal(product, buyerId) {
   const buyer = Number(buyerId);
   const price = round2(product.price);
   return db.transaction(() => {
+    // Атомарно перепроверяем и резервируем товар, чтобы его нельзя было продать дважды
+    const row = db.prepare('SELECT status FROM products WHERE id=?').get(product.id);
+    if (!row || row.status !== 'active') return { error: 'unavailable' };
     if (getBalance(buyer) < price) return { error: 'insufficient' };
+    db.prepare("UPDATE products SET status='reserved' WHERE id=?").run(product.id);
     const info = db.prepare(
       `INSERT INTO deals (product_id, title, category, buyer_id, seller_id, amount, status, created_at, updated_at, deadline_at)
        VALUES (?,?,?,?,?,?, 'created', ?, ?, ?)`
@@ -569,6 +573,8 @@ export function cancelDeal(id, { penalizeSeller = false, note = '' } = {}) {
     if (!d || d.status === 'completed' || d.status === 'cancelled') return d;
     balanceTx(d.buyer_id, d.amount, 'refund', { dealId: d.id, note: note || `Возврат по сделке #${d.id}` });
     db.prepare('UPDATE deals SET status=?, deadline_at=0, updated_at=? WHERE id=?').run('cancelled', now(), d.id);
+    // Возвращаем зарезервированный товар в продажу
+    if (d.product_id) db.prepare("UPDATE products SET status='active' WHERE id=? AND status='reserved'").run(d.product_id);
     if (penalizeSeller) addRating(d.seller_id, 1);
     return getDeal(id);
   })();
@@ -640,7 +646,7 @@ export function rejectWithdrawal(id) {
 
 // ================= REVIEWS (отзывы) =================
 export function addReview({ dealId, buyerId, sellerId, productId, stars, comment }) {
-  const s = Math.max(1, Math.min(5, Number(stars) || 0));
+  const s = Math.round(Math.max(1, Math.min(5, Number(stars) || 0)));
   const existing = db.prepare('SELECT id FROM reviews WHERE deal_id=?').get(Number(dealId));
   if (existing) return db.prepare('SELECT * FROM reviews WHERE id=?').get(existing.id);
   const info = db.prepare(

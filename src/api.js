@@ -141,6 +141,7 @@ api.patch('/products/:id/status', (req, res) => {
   const p = db.getProduct(req.params.id);
   if (!p) return res.status(404).json({ error: 'not_found' });
   if (p.seller_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+  if (p.status === 'reserved') return bad(res, 'Товар участвует в активной сделке');
   const status = str(req.body.status, 20);
   if (!['active', 'hidden'].includes(status)) return bad(res, 'Недопустимый статус');
   res.json(db.updateProductStatus(p.id, status));
@@ -150,6 +151,7 @@ api.delete('/products/:id', (req, res) => {
   const p = db.getProduct(req.params.id);
   if (!p) return res.status(404).json({ error: 'not_found' });
   if (p.seller_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
+  if (p.status === 'reserved') return bad(res, 'Нельзя удалить товар с активной сделкой');
   db.deleteProduct(p.id);
   res.json({ ok: true });
 });
@@ -295,6 +297,7 @@ api.post('/deals', (req, res) => {
   if (p.status !== 'active') return bad(res, 'Товар недоступен');
   if (!p.price || p.price <= 0) return bad(res, 'У товара договорная цена — оформите сделку через продавца в чате');
   const r = db.createEscrowDeal(p, req.user.id);
+  if (r.error === 'unavailable') return bad(res, 'Товар уже недоступен (продан или в сделке)');
   if (r.error === 'insufficient') {
     return res.status(400).json({ error: 'insufficient_funds', message: 'Недостаточно средств. Пополните баланс в профиле.' });
   }

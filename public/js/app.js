@@ -204,7 +204,7 @@ function openSheet(html) {
 function closeSheet() {
   overlay.hidden = true;
   sheetBody.innerHTML = '';
-  document.body.style.overflow = '';
+  document.body.style.overflow = (productPageOpen || listPageOpen || chatOpen) ? 'hidden' : '';
   updateBackButton();
 }
 overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSheet(); });
@@ -217,9 +217,10 @@ if (tg && tg.BackButton) {
   tg.BackButton.onClick(() => {
     const lb = document.getElementById('lightbox');
     if (lb && lb.style.display !== 'none' && lb.style.display !== '') { lb.style.display = 'none'; return; }
-    if (chatOpen) closeChat();
+    // Порядок = z-index (сверху вниз): лист > чат > страница товара > страница-список
+    if (!overlay.hidden) closeSheet();
+    else if (chatOpen) closeChat();
     else if (productPageOpen) closeProductPage();
-    else if (!overlay.hidden) closeSheet();
     else if (listPageOpen) closeListPage();
   });
 }
@@ -307,6 +308,13 @@ function categoryChips(active) {
   return html + '</div>';
 }
 
+// Единый debounce для поиска каталога (общий таймер, не пересоздаётся при каждом рендере)
+const debouncedCatSearch = debounce(() => {
+  const inp = document.getElementById('cat-search');
+  state.catalog.q = inp ? inp.value.trim() : '';
+  loadCatalogList();
+}, 350);
+
 function skeletonList() {
   const one = `<div class="pcard skeleton"><div class="pcard-av"></div><div class="pcard-main"><div class="skel skel-1"></div><div class="skel skel-2"></div></div></div>`;
   return `<div class="plist">${one.repeat(6)}</div>`;
@@ -343,8 +351,7 @@ async function renderCatalog() {
 
   const searchInput = document.getElementById('cat-search');
   const clearBtn = document.getElementById('cat-clear');
-  searchInput.addEventListener('input', () => clearBtn.classList.toggle('hidden', !searchInput.value));
-  searchInput.addEventListener('input', debounce(() => { s.q = searchInput.value.trim(); loadCatalogList(); }, 350));
+  searchInput.addEventListener('input', () => { clearBtn.classList.toggle('hidden', !searchInput.value); debouncedCatSearch(); });
   clearBtn.addEventListener('click', () => { searchInput.value = ''; s.q = ''; clearBtn.classList.add('hidden'); loadCatalogList(); });
 
   document.getElementById('cat-sort-btn').addEventListener('click', openSortSheet);
@@ -568,12 +575,16 @@ function renderProductPage(p) {
   bar.querySelector('[data-act="buy"]')?.addEventListener('click', () => { if (p.status === 'active') buyProduct(p); });
   bar.querySelector('[data-act="chat"]')?.addEventListener('click', () => startChat(p.seller_id, p.id));
   bar.querySelector('[data-act="toggle"]')?.addEventListener('click', async () => {
-    await API.patch(`/products/${p.id}/status`, { status: p.status === 'active' ? 'hidden' : 'active' });
-    haptic('success'); toast('Готово'); closeProductPage();
+    try {
+      await API.patch(`/products/${p.id}/status`, { status: p.status === 'active' ? 'hidden' : 'active' });
+      haptic('success'); toast('Готово'); closeProductPage();
+    } catch (e) { toast(e.message); haptic('error'); }
   });
   bar.querySelector('[data-act="del"]')?.addEventListener('click', async () => {
     if (!(await confirmDialog('Удалить товар?'))) return;
-    await API.del('/products/' + p.id); haptic('success'); toast('Удалено'); closeProductPage();
+    try {
+      await API.del('/products/' + p.id); haptic('success'); toast('Удалено'); closeProductPage();
+    } catch (e) { toast(e.message); haptic('error'); }
   });
 }
 
@@ -605,7 +616,7 @@ async function loadSellerReviews(sellerId) {
     box.innerHTML = `<div class="pp-section"><div class="pp-label">Отзывы о продавце (${reviews.length})</div>${reviews.map(reviewCard).join('')}</div>`;
   } catch (e) {}
 }
-function statusProductLabel(s) { return { active: 'Активен', hidden: 'Скрыт', sold: 'Продан' }[s] || s; }
+function statusProductLabel(s) { return { active: 'Активен', hidden: 'Скрыт', sold: 'Продан', reserved: 'В сделке' }[s] || s; }
 
 async function buyProduct(p) {
   if (!(await confirmDialog(`Оплатить ${money(p.price)} с баланса и создать сделку?\n\nДеньги замораживаются в сделке и уйдут продавцу только после того, как вы подтвердите получение товара.`))) return;
@@ -613,10 +624,11 @@ async function buyProduct(p) {
     const deal = await API.post('/deals', { productId: p.id });
     state.me = await API.get('/me'); // обновим баланс
     haptic('success');
-    if (productPageOpen) closeProductPage();
     closeSheet();
     toast('Сделка создана, средства заморожены');
-    await refreshUnread(); switchTab('deals');
+    await refreshUnread();
+    switchTab('deals'); // переключаем ДО закрытия страницы, чтобы не грузить каталог зря
+    if (productPageOpen) closeProductPage();
     setTimeout(() => openDealDetail(deal.id), 220);
   } catch (e) {
     haptic('error');
@@ -826,8 +838,10 @@ async function openRequestDetail(id) {
       <div class="mt12">${actions}</div>`);
     sheetBody.querySelector('[data-act="offer"]')?.addEventListener('click', () => startChat(r.buyer_id, 0));
     sheetBody.querySelector('[data-act="close"]')?.addEventListener('click', async () => {
-      await API.patch(`/requests/${r.id}/status`, { status: 'closed' });
-      toast('Заявка закрыта'); closeSheet(); loadExchangeList(); refreshListPage();
+      try {
+        await API.patch(`/requests/${r.id}/status`, { status: 'closed' });
+        toast('Заявка закрыта'); closeSheet(); loadExchangeList(); refreshListPage();
+      } catch (e) { toast(e.message); haptic('error'); }
     });
   } catch (e) { openSheet(emptyState('exclamation-triangle', e.message)); }
 }
@@ -893,6 +907,7 @@ async function startChat(targetId, productId) {
 }
 
 function openChat(chatId, other) {
+  if (chatCtx && chatCtx.timer) clearInterval(chatCtx.timer); // не оставляем висящий поллинг
   chatOpen = true;
   chatCtx = { id: chatId, other, lastId: 0, timer: null };
   let el = document.getElementById('chat-view');
@@ -1289,13 +1304,17 @@ async function openMyProducts() {
     scroll.querySelectorAll('[data-toggle]').forEach((b) =>
       b.addEventListener('click', async () => {
         const p = byId(b.dataset.toggle);
-        await API.patch(`/products/${p.id}/status`, { status: p.status === 'active' ? 'hidden' : 'active' });
-        haptic('light'); toast('Готово'); openMyProducts();
+        try {
+          await API.patch(`/products/${p.id}/status`, { status: p.status === 'active' ? 'hidden' : 'active' });
+          haptic('light'); toast('Готово'); openMyProducts();
+        } catch (e) { toast(e.message); haptic('error'); }
       }));
     scroll.querySelectorAll('[data-del]').forEach((b) =>
       b.addEventListener('click', async () => {
         if (!(await confirmDialog('Удалить товар?'))) return;
-        await API.del('/products/' + b.dataset.del); haptic('success'); toast('Удалено'); openMyProducts();
+        try {
+          await API.del('/products/' + b.dataset.del); haptic('success'); toast('Удалено'); openMyProducts();
+        } catch (e) { toast(e.message); haptic('error'); }
       }));
   } catch (e) { scroll.innerHTML = emptyState('exclamation-triangle', e.message); }
 }
@@ -1332,13 +1351,17 @@ async function openMyRequests() {
     scroll.querySelectorAll('.card').forEach((c) => c.addEventListener('click', () => openRequestDetail(Number(c.dataset.id))));
     scroll.querySelectorAll('[data-close]').forEach((b) =>
       b.addEventListener('click', async () => {
-        await API.patch(`/requests/${b.dataset.close}/status`, { status: 'closed' });
-        haptic('light'); toast('Закрыто'); openMyRequests();
+        try {
+          await API.patch(`/requests/${b.dataset.close}/status`, { status: 'closed' });
+          haptic('light'); toast('Закрыто'); openMyRequests();
+        } catch (e) { toast(e.message); haptic('error'); }
       }));
     scroll.querySelectorAll('[data-delr]').forEach((b) =>
       b.addEventListener('click', async () => {
         if (!(await confirmDialog('Удалить объявление?'))) return;
-        await API.del('/requests/' + b.dataset.delr); haptic('success'); toast('Удалено'); openMyRequests();
+        try {
+          await API.del('/requests/' + b.dataset.delr); haptic('success'); toast('Удалено'); openMyRequests();
+        } catch (e) { toast(e.message); haptic('error'); }
       }));
   } catch (e) { scroll.innerHTML = emptyState('exclamation-triangle', e.message); }
 }

@@ -58,6 +58,9 @@ app.listen(config.port, () => {
   console.log(`🌐 Веб-сервер запущен на порту ${config.port}`);
   console.log(`🔗 WEBAPP_URL: ${config.webappUrl || '(не задан)'}`);
   console.log(`👑 Админы: ${config.adminIds.join(', ') || '(не заданы)'}`);
+  if (config.allowDevAuth) {
+    console.warn('⚠️  ВНИМАНИЕ: включена ДЕВ-АВТОРИЗАЦИЯ (ALLOW_DEV_AUTH). Вход без Telegram разрешён — используйте ТОЛЬКО локально, никогда в проде!');
+  }
 });
 
 // Telegram-бот (long polling)
