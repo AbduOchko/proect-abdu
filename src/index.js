@@ -39,13 +39,22 @@ app.use('/api', api);
 // Загруженные скриншоты
 app.use('/uploads', express.static(config.uploadsDir, { maxAge: '7d', immutable: true }));
 
-// Статика: мини-приложение и админка
-app.use(express.static(publicDir));
+// Статика (index.html отдаём сами — с версией для сброса кэша Telegram)
+app.use(express.static(publicDir, { index: false }));
 
-// SPA-фолбэки
-app.get('/admin', (req, res) => res.sendFile(path.join(publicDir, 'admin', 'index.html')));
-app.get('/admin/*', (req, res) => res.sendFile(path.join(publicDir, 'admin', 'index.html')));
-app.get('/', (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+// Версия ассетов меняется при каждом деплое/перезапуске → Telegram гарантированно
+// подтягивает свежие CSS/JS, а не старые из кэша.
+const ASSET_V = Date.now();
+const ASSET_RE = /(\/css\/style\.css|\/js\/app\.js|\/admin\/admin\.css|\/admin\/admin\.js)/g;
+function sendHtml(res, file) {
+  fs.readFile(file, 'utf8', (err, html) => {
+    if (err) return res.status(404).send('Not found');
+    res.type('html').set('Cache-Control', 'no-cache').send(html.replace(ASSET_RE, `$1?v=${ASSET_V}`));
+  });
+}
+app.get('/', (req, res) => sendHtml(res, path.join(publicDir, 'index.html')));
+app.get('/admin', (req, res) => sendHtml(res, path.join(publicDir, 'admin', 'index.html')));
+app.get('/admin/*', (req, res) => sendHtml(res, path.join(publicDir, 'admin', 'index.html')));
 
 // Обработчик ошибок API
 app.use((err, req, res, next) => {
