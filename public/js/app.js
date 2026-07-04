@@ -11,9 +11,11 @@ if (tg) {
 /* ---------- theme (white/black + dark green) ---------- */
 // Пользователь может выбрать тему вручную в профиле: 'auto' | 'light' | 'dark'.
 // Выбор сохраняется на устройстве (localStorage) и переживает перезапуск приложения.
+// По умолчанию (пока пользователь сам не выберет иное) — всегда светлая тема,
+// независимо от темы Telegram/системы.
 const THEME_KEY = 'market_theme_pref';
 function getThemePref() {
-  try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { return 'auto'; }
+  try { return localStorage.getItem(THEME_KEY) || 'light'; } catch (e) { return 'light'; }
 }
 function systemScheme() {
   return (tg && tg.colorScheme) ||

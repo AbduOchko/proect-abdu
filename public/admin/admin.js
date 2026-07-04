@@ -3,9 +3,10 @@
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 if (tg) { tg.ready(); tg.expand(); }
 
-// Тема синхронизирована с выбором пользователя в профиле Mini App (тот же ключ localStorage)
+// Тема синхронизирована с выбором пользователя в профиле Mini App (тот же ключ localStorage).
+// По умолчанию — всегда светлая тема, пока пользователь сам не выберет иное.
 const THEME_KEY = 'market_theme_pref';
-function getThemePref() { try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { return 'auto'; } }
+function getThemePref() { try { return localStorage.getItem(THEME_KEY) || 'light'; } catch (e) { return 'light'; } }
 function systemScheme() { return (tg && tg.colorScheme) || (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
 function applyTheme(scheme) {
   const dark = scheme === 'dark';
