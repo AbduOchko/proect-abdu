@@ -165,6 +165,15 @@ ensureColumn('users', 'password_hash', "TEXT DEFAULT ''");
 ensureColumn('users', 'registered', 'INTEGER DEFAULT 0');        // прошёл ли обязательную регистрацию
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_key ON users(login_key) WHERE login_key != ''`);
 
+// Порядковый номер пользователя (1, 2, 3...) — показывается вместо телеграм-id, который
+// остаётся внутренним первичным ключом (на него ссылаются products/deals/chats и т.д.)
+ensureColumn('users', 'seq_id', 'INTEGER');
+if (db.prepare('SELECT COUNT(*) c FROM users WHERE seq_id IS NULL').get().c > 0) {
+  const rows = db.prepare('SELECT id FROM users ORDER BY created_at ASC, id ASC').all();
+  const setSeq = db.prepare('UPDATE users SET seq_id=? WHERE id=?');
+  db.transaction((list) => { list.forEach((r, i) => setSeq.run(i + 1, r.id)); })(rows);
+}
+
 const now = () => Date.now();
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -201,8 +210,8 @@ export function upsertUser(tg) {
     );
   } else {
     db.prepare(
-      `INSERT INTO users (id, username, first_name, last_name, photo_url, is_admin, created_at)
-       VALUES (?,?,?,?,?,?,?)`
+      `INSERT INTO users (id, seq_id, username, first_name, last_name, photo_url, is_admin, created_at)
+       VALUES (?, (SELECT COALESCE(MAX(seq_id),0)+1 FROM users), ?,?,?,?,?,?)`
     ).run(
       id,
       tg.username || null,

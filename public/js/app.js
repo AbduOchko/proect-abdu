@@ -1291,9 +1291,8 @@ async function renderProfile() {
 
       <div class="section-label">Информация</div>
       <div class="list-group">
-        <div class="ios-row"><span class="ios-ic gray">${ic('person-badge')}</span><span class="label">ID</span><span class="trailing">${me.id}</span></div>
+        <div class="ios-row"><span class="ios-ic gray">${ic('person-badge')}</span><span class="label">ID</span><span class="trailing">${me.seq_id || '—'}</span></div>
         <div class="ios-row"><span class="ios-ic blue">${ic('calendar3')}</span><span class="label">С нами с</span><span class="trailing">${since}</span></div>
-        ${me.is_admin ? `<div class="ios-row"><span class="ios-ic gold">${ic('shield-check')}</span><span class="label">Статус</span><span class="trailing">Администратор</span></div>` : ''}
       </div>
       <p class="text-hint mt12" style="text-align:center">Маркет цифровых товаров · v1.0</p>`;
 
