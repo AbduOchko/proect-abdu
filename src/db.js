@@ -413,8 +413,11 @@ export async function updateProduct(id, { category, title, description, price, g
   return getProduct(id);
 }
 
+// Атомарная условная проверка: нельзя удалить товар, который в этот момент резервируется
+// под сделку (защита от гонки с одновременной покупкой), не полагаясь на отдельное чтение статуса.
 export async function deleteProduct(id) {
-  await pool.query('DELETE FROM products WHERE id=$1', [Number(id)]);
+  const r = await pool.query("DELETE FROM products WHERE id=$1 AND status != 'reserved' RETURNING id", [Number(id)]);
+  return r.rowCount > 0;
 }
 
 export async function incProductViews(id) {
@@ -670,12 +673,19 @@ export async function sellerDeliverDeal(id) {
 }
 
 // Завершение: деньги продавцу
+// Статус меняется первым же атомарным UPDATE с условием на текущий статус (compare-and-swap) —
+// это и есть блокировка строки: конкурентный вызов либо ждёт эту транзакцию, либо, увидев уже
+// изменённый статус, не находит подходящую строку (rowCount=0) и безопасно не делает повторную выплату/возврат.
 export async function completeDeal(id, { rating } = {}) {
   return withTransaction(async (client) => {
-    const d = await getDeal(id, client);
-    if (!d || d.status === 'completed' || d.status === 'cancelled') return d;
+    const upd = await client.query(
+      `UPDATE deals SET status='completed', deadline_at=0, updated_at=$1
+       WHERE id=$2 AND status NOT IN ('completed','cancelled') RETURNING *`,
+      [now(), Number(id)]
+    );
+    if (upd.rowCount === 0) return getDeal(id, client);
+    const d = upd.rows[0];
     await balanceTx(d.seller_id, d.amount, 'release', { dealId: d.id, note: `Выплата по сделке #${d.id}` }, client);
-    await client.query('UPDATE deals SET status=$1, deadline_at=0, updated_at=$2 WHERE id=$3', ['completed', now(), d.id]);
     await client.query('UPDATE users SET deals_count = deals_count + 1 WHERE id IN ($1,$2)', [d.buyer_id, d.seller_id]);
     if (d.product_id) await client.query("UPDATE products SET status='sold' WHERE id=$1", [d.product_id]);
     if (rating) await addRating(d.seller_id, rating, client);
@@ -686,10 +696,14 @@ export async function completeDeal(id, { rating } = {}) {
 // Отмена: возврат покупателю (penalizeSeller — штрафной 1★ продавцу)
 export async function cancelDeal(id, { penalizeSeller = false, note = '' } = {}) {
   return withTransaction(async (client) => {
-    const d = await getDeal(id, client);
-    if (!d || d.status === 'completed' || d.status === 'cancelled') return d;
+    const upd = await client.query(
+      `UPDATE deals SET status='cancelled', deadline_at=0, updated_at=$1
+       WHERE id=$2 AND status NOT IN ('completed','cancelled') RETURNING *`,
+      [now(), Number(id)]
+    );
+    if (upd.rowCount === 0) return getDeal(id, client);
+    const d = upd.rows[0];
     await balanceTx(d.buyer_id, d.amount, 'refund', { dealId: d.id, note: note || `Возврат по сделке #${d.id}` }, client);
-    await client.query('UPDATE deals SET status=$1, deadline_at=0, updated_at=$2 WHERE id=$3', ['cancelled', now(), d.id]);
     // Возвращаем зарезервированный товар в продажу
     if (d.product_id) await client.query("UPDATE products SET status='active' WHERE id=$1 AND status='reserved'", [d.product_id]);
     if (penalizeSeller) await addRating(d.seller_id, 1, client);
@@ -698,7 +712,11 @@ export async function cancelDeal(id, { penalizeSeller = false, note = '' } = {})
 }
 
 export async function disputeDeal(id) {
-  await pool.query('UPDATE deals SET status=$1, updated_at=$2 WHERE id=$3', ['disputed', now(), Number(id)]);
+  const r = await pool.query(
+    `UPDATE deals SET status='disputed', updated_at=$1 WHERE id=$2 AND status IN ('created','in_progress','review') RETURNING id`,
+    [now(), Number(id)]
+  );
+  if (r.rowCount === 0) throw new DealError('invalid_state');
   return getDeal(id);
 }
 
@@ -748,8 +766,8 @@ export async function createWithdrawal(userId, amount, requisites = '') {
   }
 }
 
-export async function getWithdrawal(id) {
-  const r = await pool.query('SELECT * FROM withdrawals WHERE id=$1', [Number(id)]);
+export async function getWithdrawal(id, executor = pool) {
+  const r = await executor.query('SELECT * FROM withdrawals WHERE id=$1', [Number(id)]);
   return r.rows[0];
 }
 export async function listUserWithdrawals(userId) {
@@ -763,19 +781,22 @@ export async function listWithdrawals(status = 'all') {
   return r.rows;
 }
 export async function approveWithdrawal(id) {
-  const w = await getWithdrawal(id);
-  if (!w || w.status !== 'pending') return w;
-  await pool.query("UPDATE withdrawals SET status='approved', processed_at=$1 WHERE id=$2", [now(), Number(id)]);
-  return getWithdrawal(id);
+  const upd = await pool.query(
+    "UPDATE withdrawals SET status='approved', processed_at=$1 WHERE id=$2 AND status='pending' RETURNING *",
+    [now(), Number(id)]
+  );
+  return upd.rows[0] || getWithdrawal(id);
 }
 export async function rejectWithdrawal(id) {
   return withTransaction(async (client) => {
-    const w = await getWithdrawal(id);
-    if (!w || w.status !== 'pending') return w;
+    const upd = await client.query(
+      "UPDATE withdrawals SET status='rejected', processed_at=$1 WHERE id=$2 AND status='pending' RETURNING *",
+      [now(), Number(id)]
+    );
+    if (upd.rowCount === 0) return getWithdrawal(id, client);
+    const w = upd.rows[0];
     await balanceTx(w.user_id, w.amount, 'withdraw_refund', { note: `Вывод отклонён #${id}` }, client);
-    await client.query("UPDATE withdrawals SET status='rejected', processed_at=$1 WHERE id=$2", [now(), Number(id)]);
-    const r = await client.query('SELECT * FROM withdrawals WHERE id=$1', [Number(id)]);
-    return r.rows[0];
+    return w;
   });
 }
 

@@ -16,8 +16,19 @@ const num = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
+// Как num(), но для необязательных фильтров: некорректное значение отбрасывается (undefined),
+// а не превращается в 0 — иначе, например, ?maxPrice=abc молча отфильтровал бы все товары с ценой.
+const numOrUndef = (v) => {
+  if (v == null || v === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+};
 const validCat = (c) => CATEGORY_KEYS.includes(c);
 const fmtMoney = (n) => (Number(n) || 0).toLocaleString('ru-RU') + ' ₽';
+// Экранирование для текста, который подставляется в HTML-сообщения бота (parse_mode: 'HTML') —
+// без этого заголовок товара/сделки мог бы содержать теги вроде <a href=...> (фишинг-ссылка
+// в уведомлении, которое выглядит как официальное от бота маркетплейса).
+const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function bad(res, msg) {
   return res.status(400).json({ error: 'bad_request', message: msg });
 }
@@ -101,8 +112,8 @@ api.get('/products', async (req, res) => {
     q: str(q, 100),
     sort: str(sort, 20) || 'new',
     sellerId: sellerId ? num(sellerId) : undefined,
-    minPrice: req.query.minPrice != null && req.query.minPrice !== '' ? num(req.query.minPrice) : undefined,
-    maxPrice: req.query.maxPrice != null && req.query.maxPrice !== '' ? num(req.query.maxPrice) : undefined,
+    minPrice: numOrUndef(req.query.minPrice),
+    maxPrice: numOrUndef(req.query.maxPrice),
     status: 'active',
     limit: Math.min(num(req.query.limit) || 50, 100),
     offset: num(req.query.offset),
@@ -200,7 +211,10 @@ api.patch('/products/:id/status', async (req, res) => {
   const p = await db.getProduct(req.params.id);
   if (!p) return res.status(404).json({ error: 'not_found' });
   if (p.seller_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
-  if (p.status === 'reserved') return bad(res, 'Товар участвует в активной сделке');
+  // Переключать сам продавец может только между active/hidden, и только если товар сейчас
+  // в одном из этих статусов — иначе проданный/зарезервированный товар можно было бы
+  // "вернуть в продажу" после того, как по нему уже прошла сделка.
+  if (!['active', 'hidden'].includes(p.status)) return bad(res, 'Нельзя изменить статус этого товара');
   const status = str(req.body.status, 20);
   if (!['active', 'hidden'].includes(status)) return bad(res, 'Недопустимый статус');
   res.json(await db.updateProductStatus(p.id, status));
@@ -210,8 +224,8 @@ api.delete('/products/:id', async (req, res) => {
   const p = await db.getProduct(req.params.id);
   if (!p) return res.status(404).json({ error: 'not_found' });
   if (p.seller_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
-  if (p.status === 'reserved') return bad(res, 'Нельзя удалить товар с активной сделкой');
-  await db.deleteProduct(p.id);
+  const deleted = await db.deleteProduct(p.id);
+  if (!deleted) return bad(res, 'Нельзя удалить товар с активной сделкой');
   res.json({ ok: true });
 });
 
@@ -361,7 +375,7 @@ api.post('/deals', async (req, res) => {
     return res.status(400).json({ error: 'insufficient_funds', message: 'Недостаточно средств. Пополните баланс в профиле.' });
   }
   await db.getOrCreateChat(req.user.id, p.seller_id, p.id);
-  notifyUser(p.seller_id, `🛒 <b>Новая сделка</b> по «${p.title}» на ${fmtMoney(r.deal.amount)}.\nСредства покупателя заморожены. У вас <b>24 часа</b>, чтобы подтвердить сделку в приложении.`);
+  notifyUser(p.seller_id, `🛒 <b>Новая сделка</b> по «${escHtml(p.title)}» на ${fmtMoney(r.deal.amount)}.\nСредства покупателя заморожены. У вас <b>24 часа</b>, чтобы подтвердить сделку в приложении.`);
   res.status(201).json(r.deal);
 });
 
@@ -372,7 +386,7 @@ api.post('/deals/:id/confirm', async (req, res) => {
   if (role !== 'seller') return res.status(403).json({ error: 'forbidden', message: 'Только продавец' });
   if (d.status !== 'created') return bad(res, 'Сделку сейчас нельзя подтвердить');
   const updated = await db.sellerConfirmDeal(d.id);
-  notifyUser(d.buyer_id, `✅ Продавец подтвердил сделку по «${d.title}». Статус: «В процессе». У продавца <b>24 часа</b> на передачу товара.`);
+  notifyUser(d.buyer_id, `✅ Продавец подтвердил сделку по «${escHtml(d.title)}». Статус: «В процессе». У продавца <b>24 часа</b> на передачу товара.`);
   res.json(updated);
 });
 
@@ -383,7 +397,7 @@ api.post('/deals/:id/deliver', async (req, res) => {
   if (role !== 'seller') return res.status(403).json({ error: 'forbidden', message: 'Только продавец' });
   if (d.status !== 'in_progress') return bad(res, 'Сейчас нельзя передать на проверку');
   const updated = await db.sellerDeliverDeal(d.id);
-  notifyUser(d.buyer_id, `📦 Продавец передал товар по «${d.title}». Проверьте и нажмите «Подтвердить получение». Через <b>7 дней</b> сделка завершится автоматически.`);
+  notifyUser(d.buyer_id, `📦 Продавец передал товар по «${escHtml(d.title)}». Проверьте и нажмите «Подтвердить получение». Через <b>7 дней</b> сделка завершится автоматически.`);
   res.json(updated);
 });
 
@@ -399,7 +413,7 @@ api.post('/deals/:id/complete', async (req, res) => {
   if (comment.length < 3) return bad(res, 'Напишите комментарий к отзыву (минимум 3 символа)');
   const updated = await db.completeDeal(d.id, {}); // рейтинг добавит отзыв ниже
   await db.addReview({ dealId: d.id, buyerId: d.buyer_id, sellerId: d.seller_id, productId: d.product_id, stars: rating, comment });
-  notifyUser(d.seller_id, `🎉 Покупатель подтвердил получение по «${d.title}» и оставил отзыв (${rating}★). На баланс зачислено ${fmtMoney(d.amount)}.`);
+  notifyUser(d.seller_id, `🎉 Покупатель подтвердил получение по «${escHtml(d.title)}» и оставил отзыв (${rating}★). На баланс зачислено ${fmtMoney(d.amount)}.`);
   res.json(updated);
 });
 
@@ -424,7 +438,7 @@ api.post('/deals/:id/cancel', async (req, res) => {
   }
   const updated = await db.cancelDeal(d.id, { note: role === 'seller' ? 'Отменено продавцом' : 'Отменено покупателем (просрочка передачи)' });
   const other = role === 'seller' ? d.buyer_id : d.seller_id;
-  notifyUser(other, `❌ Сделка по «${d.title}» отменена. Средства возвращены покупателю на баланс.`);
+  notifyUser(other, `❌ Сделка по «${escHtml(d.title)}» отменена. Средства возвращены покупателю на баланс.`);
   res.json(updated);
 });
 
@@ -433,10 +447,15 @@ api.post('/deals/:id/dispute', async (req, res) => {
   const ld = await loadDeal(req, res); if (!ld) return;
   const { d, role } = ld;
   if (!['created', 'in_progress', 'review'].includes(d.status)) return bad(res, 'Спор сейчас открыть нельзя');
-  const updated = await db.disputeDeal(d.id);
-  const other = role === 'buyer' ? d.seller_id : d.buyer_id;
-  notifyUser(other, `⚠️ По сделке «${d.title}» открыт спор. Решение примет администратор.`);
-  res.json(updated);
+  try {
+    const updated = await db.disputeDeal(d.id);
+    const other = role === 'buyer' ? d.seller_id : d.buyer_id;
+    notifyUser(other, `⚠️ По сделке «${escHtml(d.title)}» открыт спор. Решение примет администратор.`);
+    res.json(updated);
+  } catch (e) {
+    if (e.code === 'invalid_state') return bad(res, 'Спор сейчас открыть нельзя');
+    throw e;
+  }
 });
 
 // ============ BALANCE / WITHDRAWALS ============
@@ -493,7 +512,8 @@ admin.patch('/products/:id/status', async (req, res) => {
 });
 
 admin.delete('/products/:id', async (req, res) => {
-  await db.deleteProduct(req.params.id);
+  const deleted = await db.deleteProduct(req.params.id);
+  if (!deleted) return bad(res, 'Нельзя удалить товар с активной сделкой');
   res.json({ ok: true });
 });
 
@@ -519,8 +539,8 @@ admin.post('/deals/:id/resolve', async (req, res) => {
   if (!['disputed', 'created', 'in_progress', 'review'].includes(d.status)) return bad(res, 'Сделка уже закрыта');
   const updated = await db.resolveDispute(d.id, outcome);
   const msg = outcome === 'release' ? 'в пользу продавца (выплата)' : 'возврат покупателю';
-  notifyUser(d.buyer_id, `⚖️ Спор по «${d.title}» решён: ${msg}.`);
-  notifyUser(d.seller_id, `⚖️ Спор по «${d.title}» решён: ${msg}.`);
+  notifyUser(d.buyer_id, `⚖️ Спор по «${escHtml(d.title)}» решён: ${msg}.`);
+  notifyUser(d.seller_id, `⚖️ Спор по «${escHtml(d.title)}» решён: ${msg}.`);
   res.json(updated);
 });
 
