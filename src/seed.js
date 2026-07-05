@@ -3,7 +3,7 @@
 //                  npm run seed -- --force   (добавить в любом случае)
 // Или автоматически на старте, если задать SEED_DEMO=1 (сидирует пустую БД).
 import { fileURLToPath } from 'node:url';
-import { db, upsertUser, createProduct, createRequest, addRating } from './db.js';
+import { pool, ready, upsertUser, createProduct, createRequest, addRating } from './db.js';
 
 // Фейковые пользователи (id в отдельном диапазоне, чтобы не пересекаться с реальными)
 const U = [
@@ -94,20 +94,18 @@ const RATINGS = [
   [5, [5, 4]], [6, [5, 5, 5]], [7, [4, 5]], [8, [5, 5, 4, 4]], [9, [5, 4, 5]],
 ];
 
-export function seedDemo({ force = false } = {}) {
-  const count = db.prepare('SELECT COUNT(*) n FROM products').get().n;
-  if (count > 0 && !force) {
+export async function seedDemo({ force = false } = {}) {
+  await ready();
+  const { rows } = await pool.query('SELECT COUNT(*)::int n FROM products');
+  if (rows[0].n > 0 && !force) {
     console.log('ℹ️  Демо-данные пропущены: в БД уже есть товары (запустите с --force, чтобы добавить принудительно).');
     return { skipped: true };
   }
 
-  const tx = db.transaction(() => {
-    U.forEach((u) => upsertUser(u));
-    RATINGS.forEach(([i, arr]) => arr.forEach((stars) => addRating(id(i), stars)));
-    PRODUCTS.forEach((p) => createProduct({ seller_id: id(p.s), ...p }));
-    REQUESTS.forEach((r) => createRequest({ buyer_id: id(r.b), ...r }));
-  });
-  tx();
+  for (const u of U) await upsertUser(u);
+  for (const [i, arr] of RATINGS) for (const stars of arr) await addRating(id(i), stars);
+  for (const p of PRODUCTS) await createProduct({ seller_id: id(p.s), ...p });
+  for (const r of REQUESTS) await createRequest({ buyer_id: id(r.b), ...r });
 
   console.log(`✅ Демо-данные добавлены: ${PRODUCTS.length} товаров и ${REQUESTS.length} объявлений.`);
   return { products: PRODUCTS.length, requests: REQUESTS.length };
@@ -116,6 +114,7 @@ export function seedDemo({ force = false } = {}) {
 // Прямой запуск: node src/seed.js [--force]
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
-  seedDemo({ force: process.argv.includes('--force') });
-  process.exit(0);
+  seedDemo({ force: process.argv.includes('--force') })
+    .then(() => process.exit(0))
+    .catch((e) => { console.error(e); process.exit(1); });
 }

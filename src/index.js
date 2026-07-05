@@ -5,19 +5,21 @@ import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
 import { api } from './api.js';
 import { createBot, setupMenuButton } from './bot.js';
-import { processDealTimeouts } from './db.js'; // + инициализация схемы БД
+import { ready, processDealTimeouts, pool } from './db.js';
 import { seedDemo } from './seed.js';
 import { setBot, notifyUser } from './notify.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '..', 'public');
 
+await ready(); // дожидаемся создания схемы Postgres, прежде чем принимать запросы
+
 // Папка для загруженных скриншотов
 fs.mkdirSync(config.uploadsDir, { recursive: true });
 
 // Демо-данные (только если задано SEED_DEMO=1 и БД пустая)
 if (process.env.SEED_DEMO === '1') {
-  try { seedDemo(); } catch (e) { console.error('Ошибка сидирования:', e); }
+  try { await seedDemo(); } catch (e) { console.error('Ошибка сидирования:', e); }
 }
 
 const app = express();
@@ -96,10 +98,14 @@ if (bot) {
   process.once('SIGTERM', stop);
 }
 
+const closePool = () => { pool.end().catch(() => {}); };
+process.once('SIGINT', closePool);
+process.once('SIGTERM', closePool);
+
 // Фоновая обработка дедлайнов сделок (автоотмена/автозавершение) каждую минуту
-function runDealTimeouts() {
+async function runDealTimeouts() {
   try {
-    const events = processDealTimeouts();
+    const events = await processDealTimeouts();
     for (const e of events) {
       const d = e.deal;
       if (!d) continue;
@@ -115,8 +121,8 @@ function runDealTimeouts() {
     console.error('Ошибка обработки дедлайнов сделок:', e);
   }
 }
-setInterval(runDealTimeouts, 60 * 1000);
-runDealTimeouts();
+setInterval(() => { runDealTimeouts(); }, 60 * 1000);
+await runDealTimeouts();
 
 // Подстраховка: не позволяем необработанным промисам ронять процесс
 process.on('unhandledRejection', (reason) => {

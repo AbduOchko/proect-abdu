@@ -60,19 +60,19 @@ function extractInitData(req) {
  * Express middleware: аутентификация пользователя Mini App.
  * Кладёт в req.user запись из БД.
  */
-export function authMiddleware(req, res, next) {
+export async function authMiddleware(req, res, next) {
   let user;
 
   if (config.allowDevAuth) {
     // Режим локальной разработки без Telegram
     const devId = Number(req.get('X-Dev-User-Id') || req.query.devUserId || 777000);
-    user = upsertUser({ id: devId, first_name: 'Dev', username: 'dev_user' });
+    user = await upsertUser({ id: devId, first_name: 'Dev', username: 'dev_user' });
   } else {
     const tgUser = validateInitData(extractInitData(req), config.botToken);
     if (!tgUser) {
       return res.status(401).json({ error: 'unauthorized', message: 'Неверные данные авторизации Telegram' });
     }
-    user = upsertUser(tgUser);
+    user = await upsertUser(tgUser);
   }
 
   if (user.is_banned) {

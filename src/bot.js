@@ -15,7 +15,7 @@ export function createBot() {
 
   bot.command('start', async (ctx) => {
     // Регистрируем/обновляем пользователя
-    upsertUser({
+    await upsertUser({
       id: ctx.from.id,
       username: ctx.from.username,
       first_name: ctx.from.first_name,

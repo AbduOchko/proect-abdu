@@ -20,7 +20,10 @@ export const config = {
     .map((s) => Number(s))
     .filter((n) => Number.isFinite(n)),
   port: Number(process.env.PORT) || 3000,
-  dbPath: process.env.DB_PATH || './data/marketplace.db',
+  databaseUrl: process.env.DATABASE_URL || '',
+  // Внутренние соединения Railway (тот же проект) не требуют SSL; для внешних
+  // провайдеров Postgres (Supabase/Neon/RDS и т.п.) выставьте PGSSL=true.
+  pgSsl: process.env.PGSSL === '1' || process.env.PGSSL === 'true',
   // Дев-авторизация (вход без Telegram) РАЗРЕШЕНА только вне production — чтобы
   // случайно выставленный ALLOW_DEV_AUTH в проде не открыл доступ под любым userId.
   allowDevAuth:
@@ -28,8 +31,9 @@ export const config = {
     (process.env.ALLOW_DEV_AUTH === '1' || process.env.ALLOW_DEV_AUTH === 'true'),
 };
 
-// Папка для загруженных изображений — рядом с БД (чтобы делить один Volume на Railway)
-config.uploadsDir = path.join(path.dirname(path.resolve(config.dbPath)), 'uploads');
+// Папка для загруженных изображений. На Railway это отдельный Volume от Postgres —
+// подключите его к сервису web (Settings → Volumes), иначе файлы не переживут передеплой.
+config.uploadsDir = path.resolve(process.env.UPLOADS_DIR || './data/uploads');
 
 export function isAdminId(id) {
   return config.adminIds.includes(Number(id));
