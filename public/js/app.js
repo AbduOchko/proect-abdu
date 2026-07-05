@@ -279,6 +279,19 @@ function refreshListPage() {
   if (!listPageOpen) return;
   if (listPageKind === 'products') openMyProducts();
   else if (listPageKind === 'requests') openMyRequests();
+  else if (listPageKind === 'favorites') openFavorites();
+}
+
+async function openFavorites() {
+  const scroll = ensureListPage('Избранное');
+  listPageKind = 'favorites';
+  try {
+    const items = await API.get('/favorites');
+    scroll.innerHTML = items.length
+      ? `<div class="plist">${items.map((p, i) => productCard(p, i)).join('')}</div>`
+      : emptyState('heart', 'Пока нет избранных товаров.\nНажмите на сердечко на карточке товара.');
+    wireProductCards(scroll, openProductDetail);
+  } catch (e) { scroll.innerHTML = emptyState('exclamation-triangle', e.message); }
 }
 
 function confirmDialog(message) {
@@ -314,10 +327,11 @@ function renderTab() {
   else if (state.tab === 'deals') renderDeals();
   else if (state.tab === 'profile') renderProfile();
 }
-function setAddButton(handler) {
-  topAction.innerHTML = `<button class="icon-btn" id="add-btn" aria-label="Добавить">${ic('plus-lg')}</button>`;
-  document.getElementById('add-btn').addEventListener('click', () => { haptic('light'); handler(); });
+function setTopIcon(icon, handler, label) {
+  topAction.innerHTML = `<button class="icon-btn" id="topicon-btn" aria-label="${esc(label || '')}">${ic(icon)}</button>`;
+  document.getElementById('topicon-btn').addEventListener('click', () => { haptic('light'); handler(); });
 }
+function setAddButton(handler) { setTopIcon('plus-lg', handler, 'Добавить'); }
 function setLoading() { viewEl.innerHTML = '<div class="loader"><span class="spin"></span></div>'; }
 function emptyState(icon, text) {
   return `<div class="empty"><span class="empty-ic">${ic(icon)}</span><div class="empty-t">${esc(text)}</div></div>`;
@@ -325,10 +339,18 @@ function emptyState(icon, text) {
 
 /* ================= CATALOG ================= */
 function categoryChips(active) {
-  let html = `<div class="chips"><button class="chip ${active ? '' : 'active'}" data-cat="">Все</button>`;
+  let html = `<div class="chips"><button class="chip ${active ? '' : 'active'}" data-cat="">Все <span class="chip-count" data-count="all"></span></button>`;
   for (const c of CATEGORIES)
-    html += `<button class="chip ${active === c.key ? 'active' : ''}" data-cat="${c.key}">${ic(c.icon)} ${esc(c.title)}</button>`;
+    html += `<button class="chip ${active === c.key ? 'active' : ''}" data-cat="${c.key}">${ic(c.icon)} ${esc(c.title)} <span class="chip-count" data-count="${c.key}"></span></button>`;
   return html + '</div>';
+}
+// Подставляет числа в счётчики чипов категорий (без полной перерисовки списка чипов)
+function applyCategoryCounts(counts) {
+  document.querySelectorAll('.chip-count').forEach((el) => {
+    const key = el.dataset.count;
+    const n = counts && counts[key];
+    el.textContent = n ? `(${n})` : '';
+  });
 }
 
 // Единый debounce для поиска каталога (общий таймер, не пересоздаётся при каждом рендере)
@@ -351,6 +373,7 @@ function plural(n, one, few, many) {
 
 async function renderCatalog() {
   topTitle.textContent = 'Каталог';
+  setTopIcon('heart', openFavorites, 'Избранное');
   const s = state.catalog;
   const hasPrice = s.minPrice !== '' || s.maxPrice !== '';
   viewEl.innerHTML = `
@@ -400,8 +423,12 @@ async function loadCatalogList() {
       : 'Ничего не найдено';
     if (!items.length) { list.innerHTML = emptyState('bag', 'По вашему запросу\nничего не найдено'); return; }
     list.innerHTML = `<div class="plist">${items.map((p, i) => productCard(p, i)).join('')}</div>`;
-    list.querySelectorAll('.pcard').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
-  } catch (e) { list.innerHTML = emptyState('exclamation-triangle', e.message || 'Не удалось загрузить'); }
+    wireProductCards(list, openProductDetail);
+  } catch (e) { list.innerHTML = emptyState('exclamation-triangle', e.message || 'Не удалось загрузить'); return; }
+  // Счётчики категорий подгружаем отдельно и не блокируем ими показ списка товаров
+  try {
+    applyCategoryCounts(await API.get('/products/counts' + (s.q ? '?q=' + encodeURIComponent(s.q) : '')));
+  } catch (e) {}
 }
 
 function openSortSheet() {
@@ -469,15 +496,55 @@ function productCard(p, index) {
   }
   if (p.status && p.status !== 'active') tags += `<span class="tag more">${statusProductLabel(p.status)}</span>`;
   const delay = Math.min((index || 0) * 45, 420);
+  const isFav = !!p.is_favorite;
+  const rating = Number(p.seller_rating) || 0;
+  const isTopSeller = rating >= 4.5 && Number(p.seller_deals) >= 3;
+  const sellerMini = rating > 0
+    ? `<div class="pcard-seller-mini">${isTopSeller ? `${ic('patch-check-fill', 'pcard-top-badge')}` : ''}${ic('star-fill')}${rating.toFixed(1)}</div>`
+    : '';
   return `<div class="pcard" data-id="${p.id}" style="--c1:${g[0]};--c2:${g[1]};--d:${delay}ms">
-    <div class="pcard-av">${p.avatar ? `<img src="${esc(p.avatar)}" alt="">` : ic(c.icon)}</div>
+    <div class="pcard-av">
+      ${p.avatar ? `<img src="${esc(p.avatar)}" alt="">` : ic(c.icon)}
+      <button class="pcard-heart ${isFav ? 'active' : ''}" data-fav="${p.id}" aria-label="В избранное">${ic(isFav ? 'heart-fill' : 'heart')}</button>
+    </div>
     <div class="pcard-main">
       <div class="pcard-title">${esc(p.title)}</div>
       ${specs ? `<div class="pcard-specs">${specs}</div>` : ''}
-      <div class="pcard-tags">${tags}</div>
+      <div class="pcard-bottom-row">
+        <div class="pcard-tags">${tags}</div>
+        ${sellerMini}
+      </div>
     </div>
     <div class="pcard-price">${money(p.price)}</div>
   </div>`;
+}
+
+// Навешивает клик-по-карточке (открыть товар) и клик-по-сердцу (избранное) на список .pcard в контейнере
+function wireProductCards(container, onOpen) {
+  container.querySelectorAll('.pcard').forEach((el) =>
+    el.addEventListener('click', () => onOpen(Number(el.dataset.id))));
+  container.querySelectorAll('[data-fav]').forEach((btn) =>
+    btn.addEventListener('click', (e) => { e.stopPropagation(); toggleFavoriteBtn(btn); }));
+}
+
+async function toggleFavoriteBtn(btn) {
+  const id = btn.dataset.fav;
+  const wasActive = btn.classList.contains('active');
+  btn.classList.toggle('active', !wasActive);
+  btn.innerHTML = ic(wasActive ? 'heart' : 'heart-fill');
+  haptic(wasActive ? 'light' : 'success');
+  try {
+    await API.post(`/products/${id}/favorite`, {});
+    // Убрали из избранного прямо на странице «Избранное» — карточка сразу исчезает из списка
+    if (wasActive && listPageKind === 'favorites') {
+      const card = btn.closest('.pcard');
+      if (card) card.remove();
+    }
+  } catch (e) {
+    btn.classList.toggle('active', wasActive);
+    btn.innerHTML = ic(wasActive ? 'heart-fill' : 'heart');
+    toast(e.message);
+  }
 }
 
 // ---------- полноэкранная страница товара ----------
@@ -488,7 +555,7 @@ async function openProductDetail(id) {
     <div class="pp-head">
       <button class="back" id="pp-back">${ic('chevron-left')}</button>
       <div class="pp-htitle">Товар</div>
-      <div style="width:34px"></div>
+      <div id="pp-fav-slot" style="width:34px"></div>
     </div>
     <div class="pp-scroll"><div class="loader"><span class="spin"></span></div></div>`;
   el.style.display = 'flex';
@@ -522,6 +589,14 @@ function renderProductPage(p) {
   const mine = state.me && p.seller_id === state.me.id;
   const seller = { first_name: p.seller_name, username: p.seller_username, photo_url: p.seller_photo };
   const isChannel = p.category === 'channel';
+
+  const favSlot = document.getElementById('pp-fav-slot');
+  if (favSlot && !mine) {
+    const isFav = !!p.is_favorite;
+    favSlot.style.width = '';
+    favSlot.innerHTML = `<button class="icon-btn pcard-heart-lg ${isFav ? 'active' : ''}" id="pp-fav-btn" data-fav="${p.id}" aria-label="В избранное">${ic(isFav ? 'heart-fill' : 'heart')}</button>`;
+    document.getElementById('pp-fav-btn').addEventListener('click', (e) => toggleFavoriteBtn(e.currentTarget));
+  }
 
   const genresHtml = isChannel && p.genres && p.genres.length
     ? `<div class="pp-section"><div class="pp-label">Тематики</div><div class="pp-tags">${p.genres.map((x) => `<span class="tag">${esc(x)}</span>`).join('')}</div></div>`
@@ -1331,7 +1406,7 @@ async function openMyProducts() {
       ${items.length ? items.map((p, i) => myProductCard(p, i)).join('') : emptyState('bag', 'У вас пока нет товаров.\nНажмите «Добавить товар».')}`;
     const byId = (id) => items.find((x) => x.id === Number(id));
     document.getElementById('mp-add').addEventListener('click', () => openProductForm());
-    scroll.querySelectorAll('.pcard').forEach((c) => c.addEventListener('click', () => openProductDetail(Number(c.dataset.id))));
+    wireProductCards(scroll, openProductDetail);
     scroll.querySelectorAll('[data-edit]').forEach((b) =>
       b.addEventListener('click', () => openProductForm(byId(b.dataset.edit))));
     scroll.querySelectorAll('[data-toggle]').forEach((b) =>

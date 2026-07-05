@@ -52,6 +52,14 @@ api.get('/users/:id', (req, res) => {
 });
 
 // ============ CATALOG (products) ============
+// Помечает товары флагом is_favorite для текущего пользователя
+function withFavorites(items, userId) {
+  const favIds = db.getFavoriteIds(userId);
+  const arr = Array.isArray(items) ? items : [items];
+  for (const p of arr) if (p) p.is_favorite = favIds.has(p.id);
+  return items;
+}
+
 api.get('/products', (req, res) => {
   const { category, q, sort, sellerId } = req.query;
   const items = db.listProducts({
@@ -65,7 +73,12 @@ api.get('/products', (req, res) => {
     limit: Math.min(num(req.query.limit) || 50, 100),
     offset: num(req.query.offset),
   });
-  res.json(items);
+  res.json(withFavorites(items, req.user.id));
+});
+
+// Кол-во активных товаров по категориям (для счётчиков на чипах каталога)
+api.get('/products/counts', (req, res) => {
+  res.json(db.productCategoryCounts(str(req.query.q, 100)));
 });
 
 api.get('/products/mine', (req, res) => {
@@ -76,7 +89,19 @@ api.get('/products/:id', (req, res) => {
   const p = db.getProduct(req.params.id);
   if (!p) return res.status(404).json({ error: 'not_found' });
   db.incProductViews(p.id);
-  res.json(p);
+  res.json(withFavorites(p, req.user.id));
+});
+
+// ============ FAVORITES (избранное) ============
+api.get('/favorites', (req, res) => {
+  res.json(withFavorites(db.listFavoriteProducts(req.user.id), req.user.id));
+});
+
+api.post('/products/:id/favorite', (req, res) => {
+  const p = db.getProduct(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not_found' });
+  const favorited = db.toggleFavorite(req.user.id, p.id);
+  res.json({ favorited });
 });
 
 // Разбор и валидация полей товара (общая для создания и редактирования)

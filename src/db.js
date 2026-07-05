@@ -133,6 +133,14 @@ CREATE TABLE IF NOT EXISTS reviews (
   UNIQUE(deal_id)
 );
 CREATE INDEX IF NOT EXISTS idx_reviews_seller ON reviews(seller_id, id);
+
+CREATE TABLE IF NOT EXISTS favorites (
+  user_id     INTEGER NOT NULL,
+  product_id  INTEGER NOT NULL,
+  created_at  INTEGER,
+  PRIMARY KEY (user_id, product_id)
+);
+CREATE INDEX IF NOT EXISTS idx_favorites_product ON favorites(product_id);
 `);
 
 // ---- Миграции: добавляем новые колонки, если их нет ----
@@ -262,6 +270,22 @@ const productSelect = `
 
 export function getProduct(id) {
   return hydrateProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(Number(id)));
+}
+
+// Кол-во активных товаров по каждой категории (учитывает поисковый запрос) — для счётчиков на чипах каталога
+export function productCategoryCounts(q = '') {
+  const rows = q
+    ? db.prepare(
+        `SELECT category, COUNT(*) n FROM products
+         WHERE status='active' AND (lower_u(title) LIKE lower_u(?) OR lower_u(description) LIKE lower_u(?))
+         GROUP BY category`
+      ).all(`%${q}%`, `%${q}%`)
+    : db.prepare(`SELECT category, COUNT(*) n FROM products WHERE status='active' GROUP BY category`).all();
+  const out = {};
+  let total = 0;
+  for (const r of rows) { out[r.category] = r.n; total += r.n; }
+  out.all = total;
+  return out;
 }
 
 // Средняя оценка по всем отзывам сервиса — «приор» для байесовского рейтинга.
@@ -666,6 +690,31 @@ export function listSellerReviews(sellerId, limit = 20) {
      FROM reviews r JOIN users u ON u.id = r.buyer_id
      WHERE r.seller_id = ? ORDER BY r.id DESC LIMIT ?`
   ).all(Number(sellerId), limit);
+}
+
+// ================= FAVORITES (избранное) =================
+export function toggleFavorite(userId, productId) {
+  const uid = Number(userId), pid = Number(productId);
+  const existing = db.prepare('SELECT 1 FROM favorites WHERE user_id=? AND product_id=?').get(uid, pid);
+  if (existing) {
+    db.prepare('DELETE FROM favorites WHERE user_id=? AND product_id=?').run(uid, pid);
+    return false;
+  }
+  db.prepare('INSERT INTO favorites (user_id, product_id, created_at) VALUES (?,?,?)').run(uid, pid, now());
+  return true;
+}
+
+export function getFavoriteIds(userId) {
+  return new Set(
+    db.prepare('SELECT product_id FROM favorites WHERE user_id=?').all(Number(userId)).map((r) => r.product_id)
+  );
+}
+
+export function listFavoriteProducts(userId) {
+  return db
+    .prepare(`${productSelect} JOIN favorites f ON f.product_id = p.id WHERE f.user_id = ? ORDER BY f.created_at DESC`)
+    .all(Number(userId))
+    .map(hydrateProduct);
 }
 
 // ================= ADMIN STATS =================
