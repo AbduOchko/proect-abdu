@@ -44,6 +44,39 @@ api.patch('/me', (req, res) => {
   res.json(u);
 });
 
+// ============ РЕГИСТРАЦИЯ (обязательная анкета при первом входе) ============
+const RE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const RE_LOGIN = /^[A-Za-z][A-Za-z0-9_]{2,19}$/;
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(pw, salt, 64).toString('hex');
+  return `scrypt$${salt}$${hash}`;
+}
+
+api.post('/register', (req, res) => {
+  if (req.user.registered) return bad(res, 'Вы уже зарегистрированы');
+
+  const email = str(req.body.email, 190).toLowerCase();
+  const login = str(req.body.login, 20);
+  const phoneDigits = str(req.body.phone, 40).replace(/[^\d+]/g, '');
+  const password = String(req.body.password || '');
+  const password2 = String(req.body.password2 || '');
+
+  if (!RE_EMAIL.test(email)) return bad(res, 'Введите корректный email');
+  if (phoneDigits.replace('+', '').length < 10) return bad(res, 'Введите корректный номер телефона');
+  if (!RE_LOGIN.test(login)) return bad(res, 'Логин: 3-20 символов, латиница/цифры/_, должен начинаться с буквы');
+  if (password.length < 8) return bad(res, 'Пароль должен быть не короче 8 символов');
+  if (password !== password2) return bad(res, 'Пароли не совпадают');
+
+  try {
+    const u = db.registerUser(req.user.id, { email, phone: phoneDigits, login, passwordHash: hashPassword(password) });
+    res.json({ ...u, is_admin: isAdminId(u.id) ? 1 : 0, unread: db.countUnread(u.id) });
+  } catch (e) {
+    if (e.code === 'login_taken') return bad(res, e.message);
+    throw e;
+  }
+});
+
 api.get('/users/:id', (req, res) => {
   const u = db.getUser(req.params.id);
   if (!u) return res.status(404).json({ error: 'not_found' });

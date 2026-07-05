@@ -155,6 +155,15 @@ ensureColumn('products', 'avg_age', "TEXT DEFAULT ''");          // средни
 ensureColumn('products', 'screenshots', "TEXT DEFAULT '[]'");    // скриншоты статистики (JSON-массив URL)
 ensureColumn('products', 'avatar', "TEXT DEFAULT ''");           // аватар/логотип товара (URL)
 ensureColumn('deals', 'deadline_at', 'INTEGER DEFAULT 0');       // дедлайн текущего этапа сделки
+ensureColumn('users', 'email', "TEXT DEFAULT ''");               // email, указанный при регистрации в приложении
+ensureColumn('users', 'phone', "TEXT DEFAULT ''");               // телефон, указанный при регистрации в приложении
+ensureColumn('users', 'login', "TEXT DEFAULT ''");               // логин, придуманный пользователем
+ensureColumn('users', 'login_key', "TEXT DEFAULT ''");           // логин в нижнем регистре — для проверки уникальности
+// Пароль не используется для входа (авторизация всегда идёт через Telegram initData) —
+// он лишь запрашивается и сохраняется как часть анкеты регистрации.
+ensureColumn('users', 'password_hash', "TEXT DEFAULT ''");
+ensureColumn('users', 'registered', 'INTEGER DEFAULT 0');        // прошёл ли обязательную регистрацию
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_key ON users(login_key) WHERE login_key != ''`);
 
 const now = () => Date.now();
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -209,13 +218,31 @@ export function upsertUser(tg) {
 
 export function getUser(id) {
   const u = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(id));
-  if (u) u.rating = u.rating_count ? +(u.rating_sum / u.rating_count).toFixed(2) : 0;
+  if (u) {
+    u.rating = u.rating_count ? +(u.rating_sum / u.rating_count).toFixed(2) : 0;
+    delete u.password_hash;
+    delete u.login_key;
+  }
   return u;
 }
 
 export function updateProfile(id, { bio }) {
   db.prepare('UPDATE users SET bio=? WHERE id=?').run(bio ?? '', Number(id));
   return getUser(id);
+}
+
+// ================= РЕГИСТРАЦИЯ (обязательная анкета при первом входе) =================
+export function registerUser(id, { email, phone, login, passwordHash }) {
+  const uid = Number(id);
+  try {
+    db.prepare(
+      `UPDATE users SET email=?, phone=?, login=?, login_key=?, password_hash=?, registered=1 WHERE id=?`
+    ).run(email, phone, login, login.toLowerCase(), passwordHash, uid);
+  } catch (e) {
+    if (/UNIQUE/.test(e.message || '')) throw Object.assign(new Error('Этот логин уже занят'), { code: 'login_taken' });
+    throw e;
+  }
+  return getUser(uid);
 }
 
 export function setBanned(id, banned) {
@@ -240,7 +267,12 @@ export function listUsers({ q = '', limit = 50, offset = 0 } = {}) {
        ORDER BY created_at DESC LIMIT ? OFFSET ?`
     )
     .all(q, like, like, like, limit, offset)
-    .map((u) => ({ ...u, rating: u.rating_count ? +(u.rating_sum / u.rating_count).toFixed(2) : 0 }));
+    .map((u) => {
+      const r = { ...u, rating: u.rating_count ? +(u.rating_sum / u.rating_count).toFixed(2) : 0 };
+      delete r.password_hash;
+      delete r.login_key;
+      return r;
+    });
 }
 
 // ================= PRODUCTS =================

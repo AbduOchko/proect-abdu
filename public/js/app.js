@@ -1282,6 +1282,13 @@ async function renderProfile() {
         <button class="ios-row" id="pf-requests"><span class="ios-ic">${ic('megaphone')}</span><span class="label">Мои объявления</span><span class="chev">${ic('chevron-right')}</span></button>
       </div>
 
+      <div class="section-label">Аккаунт</div>
+      <div class="list-group">
+        <div class="ios-row"><span class="ios-ic">${ic('person-badge')}</span><span class="label">Логин</span><span class="trailing">${esc(me.login || '—')}</span></div>
+        <div class="ios-row"><span class="ios-ic blue">${ic('envelope')}</span><span class="label">Email</span><span class="trailing">${esc(me.email || '—')}</span></div>
+        <div class="ios-row"><span class="ios-ic gray">${ic('telephone')}</span><span class="label">Телефон</span><span class="trailing">${esc(me.phone || '—')}</span></div>
+      </div>
+
       <div class="section-label">Информация</div>
       <div class="list-group">
         <div class="ios-row"><span class="ios-ic gray">${ic('person-badge')}</span><span class="label">ID</span><span class="trailing">${me.id}</span></div>
@@ -1487,7 +1494,139 @@ async function refreshUnread() {
   } catch (e) {}
 }
 
+/* ================= регистрация (обязательная анкета при первом входе) ================= */
+function showAuthGate() {
+  document.getElementById('topbar').style.display = 'none';
+  document.getElementById('tabbar').style.display = 'none';
+  let el = document.getElementById('auth-page');
+  if (!el) { el = document.createElement('div'); el.id = 'auth-page'; document.body.appendChild(el); }
+  el.innerHTML = `
+    <form id="rg-form" class="auth-form">
+      <div class="auth-scroll">
+        <div class="auth-hero">
+          <div class="auth-logo">${ic('bag-heart-fill')}</div>
+          <div class="auth-title">Добро пожаловать</div>
+          <div class="auth-sub">Заполните анкету, чтобы начать пользоваться маркетом</div>
+        </div>
+        <div class="auth-card">
+          <div class="field">
+            <label>${ic('envelope')} Email</label>
+            <input id="rg-email" type="email" inputmode="email" autocomplete="email" placeholder="you@example.com">
+            <div class="field-hint" id="rg-email-hint"></div>
+          </div>
+          <div class="field">
+            <label>${ic('telephone')} Телефон</label>
+            <input id="rg-phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+7 999 123-45-67">
+            <div class="field-hint" id="rg-phone-hint"></div>
+          </div>
+          <div class="field">
+            <label>${ic('person-badge')} Логин</label>
+            <input id="rg-login" type="text" autocomplete="username" placeholder="username" maxlength="20">
+            <div class="field-hint" id="rg-login-hint"></div>
+          </div>
+          <div class="field">
+            <label>${ic('lock')} Пароль</label>
+            <div class="field-pw">
+              <input id="rg-pass" type="password" autocomplete="new-password" placeholder="Минимум 8 символов">
+              <button type="button" class="field-pw-toggle" data-pw-toggle="rg-pass" aria-label="Показать пароль">${ic('eye')}</button>
+            </div>
+            <div class="field-hint" id="rg-pass-hint"></div>
+          </div>
+          <div class="field">
+            <label>${ic('lock-fill')} Повторите пароль</label>
+            <div class="field-pw">
+              <input id="rg-pass2" type="password" autocomplete="new-password" placeholder="Ещё раз">
+              <button type="button" class="field-pw-toggle" data-pw-toggle="rg-pass2" aria-label="Показать пароль">${ic('eye')}</button>
+            </div>
+            <div class="field-hint" id="rg-pass2-hint"></div>
+          </div>
+        </div>
+        <div class="auth-error" id="rg-error" hidden></div>
+      </div>
+      <div class="pp-actions">
+        <button type="submit" class="btn" id="rg-submit" disabled>${ic('arrow-right-circle-fill')} Создать аккаунт</button>
+      </div>
+    </form>`;
+  el.style.display = 'flex';
+  wireAuthGate();
+}
+
+function wireAuthGate() {
+  const $ = (id) => document.getElementById(id);
+  const form = $('rg-form');
+  const email = $('rg-email'), phone = $('rg-phone'), login = $('rg-login'), pass = $('rg-pass'), pass2 = $('rg-pass2');
+  const submit = $('rg-submit'), errBox = $('rg-error');
+  const RE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const RE_LOGIN = /^[A-Za-z][A-Za-z0-9_]{2,19}$/;
+  const digits = (v) => v.replace(/[^\d+]/g, '');
+
+  function setHint(id, msg) {
+    const h = $(id);
+    h.textContent = msg || '';
+    h.classList.toggle('show', !!msg);
+  }
+  function validate() {
+    const emailOk = RE_EMAIL.test(email.value.trim());
+    setHint('rg-email-hint', email.value && !emailOk ? 'Введите корректный email' : '');
+    const phoneOk = digits(phone.value).replace('+', '').length >= 10;
+    setHint('rg-phone-hint', phone.value && !phoneOk ? 'Введите корректный номер телефона' : '');
+    const loginOk = RE_LOGIN.test(login.value.trim());
+    setHint('rg-login-hint', login.value && !loginOk ? 'Латиница/цифры/_, 3-20 символов, начало — буква' : '');
+    const passOk = pass.value.length >= 8;
+    setHint('rg-pass-hint', pass.value && !passOk ? 'Минимум 8 символов' : '');
+    const matchOk = pass2.value.length > 0 && pass2.value === pass.value;
+    setHint('rg-pass2-hint', pass2.value && !matchOk ? 'Пароли не совпадают' : '');
+    const allFilled = email.value.trim() && phone.value.trim() && login.value.trim() && pass.value && pass2.value;
+    const ok = !!(allFilled && emailOk && phoneOk && loginOk && passOk && matchOk);
+    submit.disabled = !ok;
+    return ok;
+  }
+  [email, phone, login, pass, pass2].forEach((inp) => inp.addEventListener('input', () => { errBox.hidden = true; validate(); }));
+
+  document.querySelectorAll('[data-pw-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const inp = $(btn.dataset.pwToggle);
+      const show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      btn.innerHTML = ic(show ? 'eye-slash' : 'eye');
+      haptic('light');
+    });
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!validate()) { haptic('error'); return; }
+    submit.disabled = true;
+    const prevHtml = submit.innerHTML;
+    submit.innerHTML = `<span class="spin sm"></span> Создаём аккаунт…`;
+    try {
+      const me = await API.post('/register', {
+        email: email.value.trim(), phone: phone.value.trim(), login: login.value.trim(),
+        password: pass.value, password2: pass2.value,
+      });
+      state.me = me;
+      haptic('success');
+      document.getElementById('auth-page').style.display = 'none';
+      document.getElementById('topbar').style.display = '';
+      document.getElementById('tabbar').style.display = '';
+      startApp();
+    } catch (err) {
+      errBox.textContent = err.message || 'Не удалось зарегистрироваться';
+      errBox.hidden = false;
+      haptic('error');
+      submit.innerHTML = prevHtml;
+      validate();
+    }
+  });
+  validate();
+}
+
 /* ================= init ================= */
+function startApp() {
+  switchTab('catalog');
+  refreshUnread();
+  setInterval(() => { if (!chatOpen) refreshUnread(); }, 15000);
+}
 async function init() {
   try { state.me = await API.get('/me'); }
   catch (e) {
@@ -1498,8 +1637,7 @@ async function init() {
     document.getElementById('topbar-action').innerHTML = '';
     return;
   }
-  switchTab('catalog');
-  refreshUnread();
-  setInterval(() => { if (!chatOpen) refreshUnread(); }, 15000);
+  if (!state.me.registered) { showAuthGate(); return; }
+  startApp();
 }
 init();
