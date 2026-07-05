@@ -1242,9 +1242,9 @@ async function renderProfile() {
     const since = me.created_at ? new Date(me.created_at).toLocaleDateString('ru-RU') : '';
     viewEl.innerHTML = `
       <div class="profile-head">
-        ${avatarHtml(me, 'lg')}
-        <div class="profile-name">${userName(me)}</div>
-        ${me.username ? `<div class="profile-username">@${esc(me.username)}</div>` : ''}
+        <span class="avatar lg">${esc((me.login || '?').charAt(0).toUpperCase())}</span>
+        <div class="profile-name">${esc(me.login || 'Пользователь')}</div>
+        ${me.email ? `<div class="profile-username">${esc(me.email)}</div>` : ''}
         <div>${stars(me.rating)}</div>
       </div>
       <div class="profile-stats">
