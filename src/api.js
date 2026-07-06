@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { authMiddleware, adminOnly } from './auth.js';
 import { config, CATEGORY_KEYS, CATEGORIES, isAdminId } from './config.js';
 import * as db from './db.js';
-import { notifyUser } from './notify.js';
+import { notifyUser, escHtml } from './notify.js';
 
 export const api = express.Router();
 
@@ -19,16 +19,12 @@ const num = (v) => {
 // Как num(), но для необязательных фильтров: некорректное значение отбрасывается (undefined),
 // а не превращается в 0 — иначе, например, ?maxPrice=abc молча отфильтровал бы все товары с ценой.
 const numOrUndef = (v) => {
-  if (v == null || v === '') return undefined;
+  if (v == null || String(v).trim() === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
 const validCat = (c) => CATEGORY_KEYS.includes(c);
 const fmtMoney = (n) => (Number(n) || 0).toLocaleString('ru-RU') + ' ₽';
-// Экранирование для текста, который подставляется в HTML-сообщения бота (parse_mode: 'HTML') —
-// без этого заголовок товара/сделки мог бы содержать теги вроде <a href=...> (фишинг-ссылка
-// в уведомлении, которое выглядит как официальное от бота маркетплейса).
-const escHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function bad(res, msg) {
   return res.status(400).json({ error: 'bad_request', message: msg });
 }
@@ -411,7 +407,8 @@ api.post('/deals/:id/complete', async (req, res) => {
   const comment = str(req.body.comment, 1000);
   if (!rating) return bad(res, 'Поставьте оценку от 1 до 5 звёзд');
   if (comment.length < 3) return bad(res, 'Напишите комментарий к отзыву (минимум 3 символа)');
-  const updated = await db.completeDeal(d.id, {}); // рейтинг добавит отзыв ниже
+  const { applied, deal: updated } = await db.completeDeal(d.id, {}); // рейтинг добавит отзыв ниже
+  if (!applied) return bad(res, 'Сделка уже была завершена или отменена ранее');
   await db.addReview({ dealId: d.id, buyerId: d.buyer_id, sellerId: d.seller_id, productId: d.product_id, stars: rating, comment });
   notifyUser(d.seller_id, `🎉 Покупатель подтвердил получение по «${escHtml(d.title)}» и оставил отзыв (${rating}★). На баланс зачислено ${fmtMoney(d.amount)}.`);
   res.json(updated);
@@ -436,7 +433,8 @@ api.post('/deals/:id/cancel', async (req, res) => {
       ? 'Отменить можно только после просрочки передачи товара, либо через спор.'
       : 'Сейчас отменить сделку нельзя.');
   }
-  const updated = await db.cancelDeal(d.id, { note: role === 'seller' ? 'Отменено продавцом' : 'Отменено покупателем (просрочка передачи)' });
+  const { applied, deal: updated } = await db.cancelDeal(d.id, { note: role === 'seller' ? 'Отменено продавцом' : 'Отменено покупателем (просрочка передачи)' });
+  if (!applied) return bad(res, 'Сделка уже была завершена или отменена ранее');
   const other = role === 'seller' ? d.buyer_id : d.seller_id;
   notifyUser(other, `❌ Сделка по «${escHtml(d.title)}» отменена. Средства возвращены покупателю на баланс.`);
   res.json(updated);
@@ -496,6 +494,10 @@ admin.post('/users/:id/ban', async (req, res) => {
   const banned = req.body.banned ? 1 : 0;
   const u = await db.getUser(req.params.id);
   if (!u) return res.status(404).json({ error: 'not_found' });
+  // Забаненный сразу теряет доступ ко всем /api-маршрутам (включая свои же admin-маршруты) —
+  // без этой защиты админ мог бы случайно заблокировать себя (или последнего другого админа)
+  // и остаться без возможности снять бан изнутри приложения.
+  if (banned && isAdminId(u.id)) return bad(res, 'Нельзя заблокировать администратора');
   res.json(await db.setBanned(u.id, banned));
 });
 
@@ -506,8 +508,12 @@ admin.get('/products', async (req, res) => {
 admin.patch('/products/:id/status', async (req, res) => {
   const p = await db.getProduct(req.params.id);
   if (!p) return res.status(404).json({ error: 'not_found' });
+  // Та же защита, что и в маршруте продавца: показать/скрыть можно только товар, который
+  // сейчас active/hidden — иначе можно было бы вернуть в продажу уже проданный (sold) или
+  // зарезервированный под сделку товар (Скрыть -> Показать в панели админа).
+  if (!['active', 'hidden'].includes(p.status)) return bad(res, 'Нельзя изменить статус этого товара');
   const status = str(req.body.status, 20);
-  if (!['active', 'hidden', 'sold'].includes(status)) return bad(res, 'Недопустимый статус');
+  if (!['active', 'hidden'].includes(status)) return bad(res, 'Недопустимый статус');
   res.json(await db.updateProductStatus(p.id, status));
 });
 
@@ -537,7 +543,8 @@ admin.post('/deals/:id/resolve', async (req, res) => {
   const d = await db.getDeal(req.params.id);
   if (!d) return res.status(404).json({ error: 'not_found' });
   if (!['disputed', 'created', 'in_progress', 'review'].includes(d.status)) return bad(res, 'Сделка уже закрыта');
-  const updated = await db.resolveDispute(d.id, outcome);
+  const { applied, deal: updated } = await db.resolveDispute(d.id, outcome);
+  if (!applied) return bad(res, 'Сделка уже была закрыта другим способом');
   const msg = outcome === 'release' ? 'в пользу продавца (выплата)' : 'возврат покупателю';
   notifyUser(d.buyer_id, `⚖️ Спор по «${escHtml(d.title)}» решён: ${msg}.`);
   notifyUser(d.seller_id, `⚖️ Спор по «${escHtml(d.title)}» решён: ${msg}.`);
@@ -548,15 +555,17 @@ admin.post('/deals/:id/resolve', async (req, res) => {
 admin.get('/withdrawals', async (req, res) => res.json(await db.listWithdrawals(str(req.query.status, 20) || 'all')));
 
 admin.post('/withdrawals/:id/approve', async (req, res) => {
-  const w = await db.approveWithdrawal(req.params.id);
+  const { applied, withdrawal: w } = await db.approveWithdrawal(req.params.id);
   if (!w) return res.status(404).json({ error: 'not_found' });
+  if (!applied) return bad(res, 'Заявка уже была обработана');
   notifyUser(w.user_id, `💸 Заявка на вывод ${fmtMoney(w.amount)} одобрена.`);
   res.json(w);
 });
 
 admin.post('/withdrawals/:id/reject', async (req, res) => {
-  const w = await db.rejectWithdrawal(req.params.id);
+  const { applied, withdrawal: w } = await db.rejectWithdrawal(req.params.id);
   if (!w) return res.status(404).json({ error: 'not_found' });
+  if (!applied) return bad(res, 'Заявка уже была обработана');
   notifyUser(w.user_id, `↩️ Заявка на вывод ${fmtMoney(w.amount)} отклонена, средства возвращены на баланс.`);
   res.json(w);
 });

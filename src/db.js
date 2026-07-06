@@ -676,38 +676,44 @@ export async function sellerDeliverDeal(id) {
 // Статус меняется первым же атомарным UPDATE с условием на текущий статус (compare-and-swap) —
 // это и есть блокировка строки: конкурентный вызов либо ждёт эту транзакцию, либо, увидев уже
 // изменённый статус, не находит подходящую строку (rowCount=0) и безопасно не делает повторную выплату/возврат.
-export async function completeDeal(id, { rating } = {}) {
+// allowFromDisputed=true только для админского resolveDispute — обычные действия покупателя/
+// продавца и фоновый таймаут-свип НЕ должны трогать сделку, по которой уже открыт спор.
+// Возвращает {applied, deal}: applied=false значит запрос опоздал (сделку уже закрыл кто-то
+// другой) — вызывающий код обязан не слать уведомление/не добавлять отзыв в этом случае.
+export async function completeDeal(id, { rating, allowFromDisputed = false } = {}) {
   return withTransaction(async (client) => {
+    const excluded = allowFromDisputed ? "('completed','cancelled')" : "('completed','cancelled','disputed')";
     const upd = await client.query(
       `UPDATE deals SET status='completed', deadline_at=0, updated_at=$1
-       WHERE id=$2 AND status NOT IN ('completed','cancelled') RETURNING *`,
+       WHERE id=$2 AND status NOT IN ${excluded} RETURNING *`,
       [now(), Number(id)]
     );
-    if (upd.rowCount === 0) return getDeal(id, client);
+    if (upd.rowCount === 0) return { applied: false, deal: await getDeal(id, client) };
     const d = upd.rows[0];
     await balanceTx(d.seller_id, d.amount, 'release', { dealId: d.id, note: `Выплата по сделке #${d.id}` }, client);
     await client.query('UPDATE users SET deals_count = deals_count + 1 WHERE id IN ($1,$2)', [d.buyer_id, d.seller_id]);
     if (d.product_id) await client.query("UPDATE products SET status='sold' WHERE id=$1", [d.product_id]);
     if (rating) await addRating(d.seller_id, rating, client);
-    return getDeal(id, client);
+    return { applied: true, deal: await getDeal(id, client) };
   });
 }
 
 // Отмена: возврат покупателю (penalizeSeller — штрафной 1★ продавцу)
-export async function cancelDeal(id, { penalizeSeller = false, note = '' } = {}) {
+export async function cancelDeal(id, { penalizeSeller = false, note = '', allowFromDisputed = false } = {}) {
   return withTransaction(async (client) => {
+    const excluded = allowFromDisputed ? "('completed','cancelled')" : "('completed','cancelled','disputed')";
     const upd = await client.query(
       `UPDATE deals SET status='cancelled', deadline_at=0, updated_at=$1
-       WHERE id=$2 AND status NOT IN ('completed','cancelled') RETURNING *`,
+       WHERE id=$2 AND status NOT IN ${excluded} RETURNING *`,
       [now(), Number(id)]
     );
-    if (upd.rowCount === 0) return getDeal(id, client);
+    if (upd.rowCount === 0) return { applied: false, deal: await getDeal(id, client) };
     const d = upd.rows[0];
     await balanceTx(d.buyer_id, d.amount, 'refund', { dealId: d.id, note: note || `Возврат по сделке #${d.id}` }, client);
     // Возвращаем зарезервированный товар в продажу
     if (d.product_id) await client.query("UPDATE products SET status='active' WHERE id=$1 AND status='reserved'", [d.product_id]);
     if (penalizeSeller) await addRating(d.seller_id, 1, client);
-    return getDeal(id, client);
+    return { applied: true, deal: await getDeal(id, client) };
   });
 }
 
@@ -720,13 +726,16 @@ export async function disputeDeal(id) {
   return getDeal(id);
 }
 
-// Решение спора админом: 'release' — продавцу, 'refund' — покупателю
+// Решение спора админом: 'release' — продавцу, 'refund' — покупателю.
+// allowFromDisputed:true — единственный легитимный способ закрыть сделку из статуса 'disputed'.
 export async function resolveDispute(id, outcome) {
-  if (outcome === 'release') return completeDeal(id);
-  return cancelDeal(id, { note: `Спор решён в пользу покупателя (#${id})` });
+  if (outcome === 'release') return completeDeal(id, { allowFromDisputed: true });
+  return cancelDeal(id, { allowFromDisputed: true, note: `Спор решён в пользу покупателя (#${id})` });
 }
 
-// Фоновая обработка дедлайнов. Возвращает список событий для уведомлений.
+// Фоновая обработка дедлайнов. Возвращает список событий для уведомлений — только для
+// сделок, которые ЭТОТ вызов реально закрыл (applied=true), иначе можно разослать
+// уведомление о результате, который на самом деле определил кто-то другой (спор, ручное действие).
 export async function processDealTimeouts() {
   const t = now();
   const events = [];
@@ -734,13 +743,15 @@ export async function processDealTimeouts() {
     "SELECT id FROM deals WHERE status='created' AND deadline_at>0 AND deadline_at < $1", [t]
   );
   for (const r of overdueCreated.rows) {
-    events.push({ type: 'auto_cancel', deal: await cancelDeal(r.id, { penalizeSeller: true, note: 'Продавец не подтвердил сделку вовремя' }) });
+    const { applied, deal } = await cancelDeal(r.id, { penalizeSeller: true, note: 'Продавец не подтвердил сделку вовремя' });
+    if (applied) events.push({ type: 'auto_cancel', deal });
   }
   const overdueReview = await pool.query(
     "SELECT id FROM deals WHERE status='review' AND deadline_at>0 AND deadline_at < $1", [t]
   );
   for (const r of overdueReview.rows) {
-    events.push({ type: 'auto_complete', deal: await completeDeal(r.id, {}) });
+    const { applied, deal } = await completeDeal(r.id, {});
+    if (applied) events.push({ type: 'auto_complete', deal });
   }
   return events;
 }
@@ -780,12 +791,16 @@ export async function listWithdrawals(status = 'all') {
     : await pool.query('SELECT w.*, u.first_name, u.username FROM withdrawals w JOIN users u ON u.id=w.user_id ORDER BY w.id DESC LIMIT 200');
   return r.rows;
 }
+// {applied, withdrawal}: applied=false значит заявку уже обработал кто-то другой (например,
+// два админа одновременно нажали «Одобрить»/«Отклонить») — вызывающий код не должен слать
+// уведомление о результате, который на самом деле не он определил.
 export async function approveWithdrawal(id) {
   const upd = await pool.query(
     "UPDATE withdrawals SET status='approved', processed_at=$1 WHERE id=$2 AND status='pending' RETURNING *",
     [now(), Number(id)]
   );
-  return upd.rows[0] || getWithdrawal(id);
+  if (upd.rowCount > 0) return { applied: true, withdrawal: upd.rows[0] };
+  return { applied: false, withdrawal: await getWithdrawal(id) };
 }
 export async function rejectWithdrawal(id) {
   return withTransaction(async (client) => {
@@ -793,10 +808,10 @@ export async function rejectWithdrawal(id) {
       "UPDATE withdrawals SET status='rejected', processed_at=$1 WHERE id=$2 AND status='pending' RETURNING *",
       [now(), Number(id)]
     );
-    if (upd.rowCount === 0) return getWithdrawal(id, client);
+    if (upd.rowCount === 0) return { applied: false, withdrawal: await getWithdrawal(id, client) };
     const w = upd.rows[0];
     await balanceTx(w.user_id, w.amount, 'withdraw_refund', { note: `Вывод отклонён #${id}` }, client);
-    return w;
+    return { applied: true, withdrawal: w };
   });
 }
 

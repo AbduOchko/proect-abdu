@@ -7,7 +7,7 @@ import { api } from './api.js';
 import { createBot, setupMenuButton } from './bot.js';
 import { ready, processDealTimeouts, pool } from './db.js';
 import { seedDemo } from './seed.js';
-import { setBot, notifyUser } from './notify.js';
+import { setBot, notifyUser, escHtml } from './notify.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '..', 'public');
@@ -110,11 +110,11 @@ async function runDealTimeouts() {
       const d = e.deal;
       if (!d) continue;
       if (e.type === 'auto_cancel') {
-        notifyUser(d.buyer_id, `⏱ Продавец не подтвердил сделку по «${d.title}» за 24 часа. Сделка отменена, средства возвращены на баланс.`);
-        notifyUser(d.seller_id, `⏱ Вы не подтвердили сделку по «${d.title}» за 24 часа. Сделка отменена, рейтинг снижен.`);
+        notifyUser(d.buyer_id, `⏱ Продавец не подтвердил сделку по «${escHtml(d.title)}» за 24 часа. Сделка отменена, средства возвращены на баланс.`);
+        notifyUser(d.seller_id, `⏱ Вы не подтвердили сделку по «${escHtml(d.title)}» за 24 часа. Сделка отменена, рейтинг снижен.`);
       } else if (e.type === 'auto_complete') {
-        notifyUser(d.seller_id, `⏱ Покупатель не подтвердил получение за 7 дней — сделка по «${d.title}» завершена автоматически. На баланс зачислено.`);
-        notifyUser(d.buyer_id, `⏱ Сделка по «${d.title}» автоматически завершена (7 дней на проверке истекли).`);
+        notifyUser(d.seller_id, `⏱ Покупатель не подтвердил получение за 7 дней — сделка по «${escHtml(d.title)}» завершена автоматически. На баланс зачислено.`);
+        notifyUser(d.buyer_id, `⏱ Сделка по «${escHtml(d.title)}» автоматически завершена (7 дней на проверке истекли).`);
       }
     }
   } catch (e) {

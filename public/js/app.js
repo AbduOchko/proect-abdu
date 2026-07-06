@@ -296,8 +296,12 @@ async function openFavorites() {
 
 function confirmDialog(message) {
   return new Promise((resolve) => {
-    if (tg && tg.showConfirm) tg.showConfirm(message, (ok) => resolve(!!ok));
-    else resolve(window.confirm(message));
+    // tg.showConfirm может бросить исключение (например, старая версия Telegram) —
+    // без try/catch это молча ломало бы кнопку (unhandled rejection, никакой обратной связи).
+    try {
+      if (tg && tg.showConfirm) { tg.showConfirm(message, (ok) => resolve(!!ok)); return; }
+    } catch (e) {}
+    resolve(window.confirm(message));
   });
 }
 
