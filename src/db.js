@@ -323,8 +323,9 @@ export async function createProduct({ seller_id, category, title, description, p
 
 const productSelect = `
   SELECT p.*, u.username AS seller_username, u.first_name AS seller_name,
-         u.photo_url AS seller_photo,
+         u.photo_url AS seller_photo, u.login AS seller_login,
          CASE WHEN u.rating_count>0 THEN u.rating_sum::float8/u.rating_count ELSE 0 END AS seller_rating,
+         u.rating_count AS seller_review_count,
          u.deals_count AS seller_deals
   FROM products p JOIN users u ON u.id = p.seller_id`;
 

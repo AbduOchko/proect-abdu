@@ -365,7 +365,7 @@ const debouncedCatSearch = debounce(() => {
 }, 350);
 
 function skeletonList() {
-  const one = `<div class="pcard skeleton"><div class="pcard-av"></div><div class="pcard-main"><div class="skel skel-1"></div><div class="skel skel-2"></div></div></div>`;
+  const one = `<div class="pcard skeleton"><div class="pcard-top"><div class="pcard-av"></div><div class="pcard-main"><div class="skel skel-1"></div><div class="skel skel-2"></div></div></div></div>`;
   return `<div class="plist">${one.repeat(6)}</div>`;
 }
 function plural(n, one, few, many) {
@@ -502,24 +502,32 @@ function productCard(p, index) {
   const delay = Math.min((index || 0) * 45, 420);
   const isFav = !!p.is_favorite;
   const rating = Number(p.seller_rating) || 0;
+  const reviewCount = Number(p.seller_review_count) || 0;
   const isTopSeller = rating >= 4.5 && Number(p.seller_deals) >= 3;
-  const sellerMini = rating > 0
-    ? `<div class="pcard-seller-mini">${isTopSeller ? `${ic('patch-check-fill', 'pcard-top-badge')}` : ''}${ic('star-fill')}${rating.toFixed(1)}</div>`
-    : '';
+  const sellerLogin = p.seller_login || p.seller_username || 'Продавец';
+  const sellerAv = avatarHtml({ photo_url: p.seller_photo, first_name: p.seller_name, username: p.seller_username }, 'xs');
+  const sellerRating = rating > 0
+    ? `<span class="pcard-seller-rating">${ic('star-fill')}${rating.toFixed(1)}</span><span class="pcard-seller-count">(${reviewCount})</span>`
+    : `<span class="pcard-seller-new">Новый продавец</span>`;
   return `<div class="pcard" data-id="${p.id}" style="--c1:${g[0]};--c2:${g[1]};--d:${delay}ms">
-    <div class="pcard-av">
-      ${p.avatar ? `<img src="${esc(p.avatar)}" alt="">` : ic(c.icon)}
-      <button class="pcard-heart ${isFav ? 'active' : ''}" data-fav="${p.id}" aria-label="В избранное">${ic(isFav ? 'heart-fill' : 'heart')}</button>
-    </div>
-    <div class="pcard-main">
-      <div class="pcard-title">${esc(p.title)}</div>
-      ${specs ? `<div class="pcard-specs">${specs}</div>` : ''}
-      <div class="pcard-bottom-row">
-        <div class="pcard-tags">${tags}</div>
-        ${sellerMini}
+    <div class="pcard-top">
+      <div class="pcard-av">
+        ${p.avatar ? `<img src="${esc(p.avatar)}" alt="">` : ic(c.icon)}
+        <button class="pcard-heart ${isFav ? 'active' : ''}" data-fav="${p.id}" aria-label="В избранное">${ic(isFav ? 'heart-fill' : 'heart')}</button>
       </div>
+      <div class="pcard-main">
+        <div class="pcard-title">${esc(p.title)}</div>
+        ${specs ? `<div class="pcard-specs">${specs}</div>` : ''}
+        <div class="pcard-tags">${tags}</div>
+      </div>
+      <div class="pcard-price">${money(p.price)}</div>
     </div>
-    <div class="pcard-price">${money(p.price)}</div>
+    <div class="pcard-seller">
+      ${sellerAv}
+      <span class="pcard-seller-name">${esc(sellerLogin)}</span>
+      ${isTopSeller ? ic('patch-check-fill', 'pcard-top-badge') : ''}
+      ${sellerRating}
+    </div>
   </div>`;
 }
 
