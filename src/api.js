@@ -194,8 +194,21 @@ api.put('/products/:id', async (req, res) => {
   if (p.seller_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
   const r = parseProductBody(req.body);
   if (r.error) return bad(res, r.error);
-  res.json(await db.updateProduct(p.id, r.fields));
+  const updated = await db.updateProduct(p.id, r.fields);
+  // Подчищаем файлы старых скриншотов/аватара, которых больше нет в новом наборе
+  const keep = new Set([r.fields.avatar, ...(r.fields.screenshots || [])].filter(Boolean));
+  if (p.avatar && !keep.has(p.avatar)) deleteUploadedFile(p.avatar);
+  (p.screenshots || []).forEach((url) => { if (!keep.has(url)) deleteUploadedFile(url); });
+  res.json(updated);
 });
+
+// Удаляет физический файл в /uploads по его публичному URL — используется при удалении товара
+// и при замене скриншотов/аватара на редактировании, иначе диск (Volume на Railway) растёт
+// бесконечно, т.к. старые файлы никогда не отвязывались от товара.
+function deleteUploadedFile(url) {
+  if (typeof url !== 'string' || !url.startsWith('/uploads/')) return;
+  fs.unlink(path.join(config.uploadsDir, path.basename(url)), () => {});
+}
 
 // Загрузка изображения (data URL -> файл в /uploads)
 const MIME_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
@@ -234,6 +247,8 @@ api.delete('/products/:id', async (req, res) => {
   if (p.seller_id !== req.user.id) return res.status(403).json({ error: 'forbidden' });
   const deleted = await db.deleteProduct(p.id);
   if (!deleted) return bad(res, 'Нельзя удалить товар с активной сделкой');
+  deleteUploadedFile(p.avatar);
+  (p.screenshots || []).forEach(deleteUploadedFile);
   res.json({ ok: true });
 });
 
@@ -530,8 +545,10 @@ admin.patch('/products/:id/status', async (req, res) => {
 });
 
 admin.delete('/products/:id', async (req, res) => {
+  const p = await db.getProduct(req.params.id);
   const deleted = await db.deleteProduct(req.params.id);
   if (!deleted) return bad(res, 'Нельзя удалить товар с активной сделкой');
+  if (p) { deleteUploadedFile(p.avatar); (p.screenshots || []).forEach(deleteUploadedFile); }
   res.json({ ok: true });
 });
 

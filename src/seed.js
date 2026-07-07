@@ -102,6 +102,17 @@ export async function seedDemo({ force = false } = {}) {
     return { skipped: true };
   }
 
+  // Захардкоженные ID демо-продавцов/покупателей (900000001-900000010) технически попадают
+  // в диапазон реальных Telegram id — если кто-то из настоящих пользователей уже успел
+  // написать боту /start (это создаёт строку в users ещё до появления товаров), upsertUser
+  // молча перезапишет его имя/username демо-данными. Проверяем коллизию заранее.
+  const ids = U.map((u) => u.id);
+  const collision = await pool.query('SELECT id FROM users WHERE id = ANY($1::bigint[])', [ids]);
+  if (collision.rowCount > 0 && !force) {
+    console.log(`⚠️  Сидирование отменено: ID демо-пользователей уже заняты в базе (${collision.rows.map((r) => r.id).join(', ')}) — похоже, это не пустая база. Запустите с --force, если это точно демо-окружение.`);
+    return { skipped: true, collision: collision.rows.map((r) => r.id) };
+  }
+
   for (const u of U) await upsertUser(u);
   for (const [i, arr] of RATINGS) for (const stars of arr) await addRating(id(i), stars);
   for (const p of PRODUCTS) await createProduct({ seller_id: id(p.s), ...p });

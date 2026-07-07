@@ -478,11 +478,18 @@ export async function getOrCreateChat(userX, userY, productId = 0) {
   const pid = Number(productId) || 0;
   const existing = await pool.query('SELECT * FROM chats WHERE a_id=$1 AND b_id=$2 AND product_id=$3', [a, b, pid]);
   if (existing.rows[0]) return existing.rows[0];
-  const r = await pool.query(
-    'INSERT INTO chats (a_id, b_id, product_id, created_at, last_at) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-    [a, b, pid, now(), now()]
-  );
-  return r.rows[0];
+  try {
+    const r = await pool.query(
+      'INSERT INTO chats (a_id, b_id, product_id, created_at, last_at) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      [a, b, pid, now(), now()]
+    );
+    return r.rows[0];
+  } catch (e) {
+    if (e.code !== '23505') throw e;
+    // Гонка: тот же чат уже создал параллельный запрос между SELECT и INSERT — возвращаем его
+    const r2 = await pool.query('SELECT * FROM chats WHERE a_id=$1 AND b_id=$2 AND product_id=$3', [a, b, pid]);
+    return r2.rows[0];
+  }
 }
 
 export async function getChatById(id) {
@@ -830,13 +837,20 @@ export async function addReview({ dealId, buyerId, sellerId, productId, stars, c
     const r = await pool.query('SELECT * FROM reviews WHERE id=$1', [existing.rows[0].id]);
     return r.rows[0];
   }
-  const ins = await pool.query(
-    'INSERT INTO reviews (deal_id, buyer_id, seller_id, product_id, stars, comment, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
-    [Number(dealId), Number(buyerId), Number(sellerId), Number(productId) || 0, s, String(comment).slice(0, 1000), now()]
-  );
-  await addRating(sellerId, s); // обновляем агрегированный рейтинг продавца
-  const r = await pool.query('SELECT * FROM reviews WHERE id=$1', [ins.rows[0].id]);
-  return r.rows[0];
+  try {
+    const ins = await pool.query(
+      'INSERT INTO reviews (deal_id, buyer_id, seller_id, product_id, stars, comment, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
+      [Number(dealId), Number(buyerId), Number(sellerId), Number(productId) || 0, s, String(comment).slice(0, 1000), now()]
+    );
+    await addRating(sellerId, s); // обновляем агрегированный рейтинг продавца
+    const r = await pool.query('SELECT * FROM reviews WHERE id=$1', [ins.rows[0].id]);
+    return r.rows[0];
+  } catch (e) {
+    if (e.code !== '23505') throw e;
+    // Гонка: отзыв на эту сделку уже вставил параллельный запрос — возвращаем его, не дублируя рейтинг
+    const r = await pool.query('SELECT * FROM reviews WHERE deal_id=$1', [Number(dealId)]);
+    return r.rows[0];
+  }
 }
 
 export async function getReviewByDeal(dealId) {

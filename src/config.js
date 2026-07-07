@@ -19,15 +19,20 @@ export const config = {
     .filter(Boolean)
     .map((s) => Number(s))
     .filter((n) => Number.isFinite(n)),
-  port: Number(process.env.PORT) || 3000,
+  port: (() => { const n = Number(process.env.PORT); return Number.isFinite(n) && n > 0 ? n : 3000; })(),
   databaseUrl: process.env.DATABASE_URL || '',
   // Внутренние соединения Railway (тот же проект) не требуют SSL; для внешних
   // провайдеров Postgres (Supabase/Neon/RDS и т.п.) выставьте PGSSL=true.
   pgSsl: process.env.PGSSL === '1' || process.env.PGSSL === 'true',
-  // Дев-авторизация (вход без Telegram) РАЗРЕШЕНА только вне production — чтобы
-  // случайно выставленный ALLOW_DEV_AUTH в проде не открыл доступ под любым userId.
+  // Дев-авторизация (вход без Telegram) РАЗРЕШЕНА только вне production. NODE_ENV=production
+  // никто на деплое сам не выставляет (ни Railway, ни Procfile/railway.json — это делает start.js
+  // ниже), поэтому одного NODE_ENV недостаточно: дополнительно проверяем RAILWAY_ENVIRONMENT —
+  // эту переменную сама платформа Railway выставляет для ЛЮБОГО задеплоенного сервиса, независимо
+  // от того, не забыли ли где-то прописать NODE_ENV. Так забытый ALLOW_DEV_AUTH=1 в переменных
+  // Railway не даст войти под любым userId в реальном деплое.
   allowDevAuth:
     process.env.NODE_ENV !== 'production' &&
+    !process.env.RAILWAY_ENVIRONMENT &&
     (process.env.ALLOW_DEV_AUTH === '1' || process.env.ALLOW_DEV_AUTH === 'true'),
 };
 
