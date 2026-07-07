@@ -671,19 +671,25 @@ export async function createEscrowDeal(product, buyerId) {
 }
 
 // Продавец подтвердил -> В процессе (24ч на передачу)
+// CAS-условие WHERE status='created' — без него конкурентный спор (disputeDeal), открытый
+// между чтением статуса в api.js и этим UPDATE, тихо перезаписывался бы обратно в 'in_progress'.
 export async function sellerConfirmDeal(id) {
-  await pool.query('UPDATE deals SET status=$1, deadline_at=$2, updated_at=$3 WHERE id=$4', [
-    'in_progress', now() + DEAL_MS.deliver, now(), Number(id),
-  ]);
-  return getDeal(id);
+  const upd = await pool.query(
+    "UPDATE deals SET status='in_progress', deadline_at=$1, updated_at=$2 WHERE id=$3 AND status='created' RETURNING id",
+    [now() + DEAL_MS.deliver, now(), Number(id)]
+  );
+  return { applied: upd.rowCount > 0, deal: await getDeal(id) };
 }
 
 // Продавец передал -> На проверке (7 дней до автозавершения)
+// Тот же CAS-принцип: WHERE status='in_progress', иначе спор, открытый в этот момент,
+// можно было бы молча вернуть в 'review' и позже автозавершить в обход решения администратора.
 export async function sellerDeliverDeal(id) {
-  await pool.query('UPDATE deals SET status=$1, deadline_at=$2, updated_at=$3 WHERE id=$4', [
-    'review', now() + DEAL_MS.review, now(), Number(id),
-  ]);
-  return getDeal(id);
+  const upd = await pool.query(
+    "UPDATE deals SET status='review', deadline_at=$1, updated_at=$2 WHERE id=$3 AND status='in_progress' RETURNING id",
+    [now() + DEAL_MS.review, now(), Number(id)]
+  );
+  return { applied: upd.rowCount > 0, deal: await getDeal(id) };
 }
 
 // Завершение: деньги продавцу

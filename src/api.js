@@ -408,7 +408,8 @@ api.post('/deals/:id/confirm', async (req, res) => {
   const { d, role } = ld;
   if (role !== 'seller') return res.status(403).json({ error: 'forbidden', message: 'Только продавец' });
   if (d.status !== 'created') return bad(res, 'Сделку сейчас нельзя подтвердить');
-  const updated = await db.sellerConfirmDeal(d.id);
+  const { applied, deal: updated } = await db.sellerConfirmDeal(d.id);
+  if (!applied) return bad(res, 'Сделку сейчас нельзя подтвердить');
   notifyUser(d.buyer_id, `✅ Продавец подтвердил сделку по «${escHtml(d.title)}». Статус: «В процессе». У продавца <b>24 часа</b> на передачу товара.`);
   res.json(updated);
 });
@@ -419,7 +420,8 @@ api.post('/deals/:id/deliver', async (req, res) => {
   const { d, role } = ld;
   if (role !== 'seller') return res.status(403).json({ error: 'forbidden', message: 'Только продавец' });
   if (d.status !== 'in_progress') return bad(res, 'Сейчас нельзя передать на проверку');
-  const updated = await db.sellerDeliverDeal(d.id);
+  const { applied, deal: updated } = await db.sellerDeliverDeal(d.id);
+  if (!applied) return bad(res, 'Сейчас нельзя передать на проверку');
   notifyUser(d.buyer_id, `📦 Продавец передал товар по «${escHtml(d.title)}». Проверьте и нажмите «Подтвердить получение». Через <b>7 дней</b> сделка завершится автоматически.`);
   res.json(updated);
 });
