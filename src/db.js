@@ -205,6 +205,9 @@ export function ready() { return schemaReady; }
 
 const now = () => Date.now();
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// Экранирует спецсимволы LIKE/ILIKE (% и _ — подстановочные знаки, \ — сам символ экранирования)
+// в пользовательском поисковом запросе, иначе, например, поиск по "_" вёл бы себя как "любой символ".
+const escLike = (s) => String(s).replace(/[\\%_]/g, '\\$&');
 
 // Тайминги сделок (эскроу)
 export const DEAL_MS = {
@@ -286,7 +289,7 @@ export async function addRating(userId, stars, executor = pool) {
 }
 
 export async function listUsers({ q = '', limit = 50, offset = 0 } = {}) {
-  const like = `%${q}%`;
+  const like = `%${escLike(q)}%`;
   const r = await pool.query(
     `SELECT * FROM users
      WHERE ($1 = '' OR username ILIKE $2 OR first_name ILIKE $3 OR id::text LIKE $4)
@@ -337,7 +340,7 @@ export async function productCategoryCounts(q = '') {
         `SELECT category, COUNT(*)::int n FROM products
          WHERE status='active' AND (title ILIKE $1 OR description ILIKE $1)
          GROUP BY category`,
-        [`%${q}%`]
+        [`%${escLike(q)}%`]
       )
     : await pool.query(`SELECT category, COUNT(*)::int n FROM products WHERE status='active' GROUP BY category`);
   const out = {};
@@ -370,7 +373,7 @@ export async function listProducts({ category, q = '', sellerId, status = 'activ
   if (status && status !== 'all') clauses.push(`p.status = ${p(status)}`);
   if (category) clauses.push(`p.category = ${p(category)}`);
   if (sellerId) clauses.push(`p.seller_id = ${p(Number(sellerId))}`);
-  if (q) { const ph = p(`%${q}%`); clauses.push(`(p.title ILIKE ${ph} OR p.description ILIKE ${ph})`); }
+  if (q) { const ph = p(`%${escLike(q)}%`); clauses.push(`(p.title ILIKE ${ph} OR p.description ILIKE ${ph})`); }
   if (minPrice != null && minPrice !== '') clauses.push(`p.price >= ${p(Number(minPrice))}`);
   if (maxPrice != null && maxPrice !== '') clauses.push(`p.price <= ${p(Number(maxPrice))}`);
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -451,7 +454,7 @@ export async function listRequests({ category, q = '', buyerId, status = 'active
   if (status && status !== 'all') clauses.push(`r.status = ${p(status)}`);
   if (category) clauses.push(`r.category = ${p(category)}`);
   if (buyerId) clauses.push(`r.buyer_id = ${p(Number(buyerId))}`);
-  if (q) { const ph = p(`%${q}%`); clauses.push(`(r.title ILIKE ${ph} OR r.description ILIKE ${ph})`); }
+  if (q) { const ph = p(`%${escLike(q)}%`); clauses.push(`(r.title ILIKE ${ph} OR r.description ILIKE ${ph})`); }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const limitPh = p(limit);
   const offsetPh = p(offset);
@@ -630,22 +633,26 @@ export async function listDeals(userId, role = 'all') {
 // Покупка: замораживаем средства покупателя и создаём сделку (status=created)
 export async function createEscrowDeal(product, buyerId) {
   const buyer = Number(buyerId);
-  const price = round2(product.price);
   try {
     const dealId = await withTransaction(async (client) => {
-      // Атомарно резервируем товар (compare-and-swap через WHERE) — так его нельзя продать дважды
+      // Атомарно резервируем товар (compare-and-swap через WHERE) — так его нельзя продать дважды.
+      // RETURNING * — берём АКТУАЛЬНУЮ цену/заголовок/категорию на момент резервирования, а не
+      // переданный снимок product (его могли успеть отредактировать между просмотром и покупкой).
       const reserve = await client.query(
-        "UPDATE products SET status='reserved' WHERE id=$1 AND status='active' RETURNING id",
+        "UPDATE products SET status='reserved' WHERE id=$1 AND status='active' RETURNING *",
         [product.id]
       );
       if (reserve.rowCount === 0) throw new DealError('unavailable');
+      const fresh = reserve.rows[0];
+      const price = round2(fresh.price);
+      if (!price || price <= 0) throw new DealError('unavailable'); // цену успели сделать договорной/нулевой
       const ins = await client.query(
         `INSERT INTO deals (product_id, title, category, buyer_id, seller_id, amount, status, created_at, updated_at, deadline_at)
          VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9) RETURNING id`,
-        [product.id, product.title, product.category, buyer, Number(product.seller_id), price, now(), now(), now() + DEAL_MS.confirm]
+        [fresh.id, fresh.title, fresh.category, buyer, Number(fresh.seller_id), price, now(), now(), now() + DEAL_MS.confirm]
       );
       const id = ins.rows[0].id;
-      await balanceTx(buyer, -price, 'hold', { dealId: id, note: `Оплата сделки #${id}: ${product.title}` }, client);
+      await balanceTx(buyer, -price, 'hold', { dealId: id, note: `Оплата сделки #${id}: ${fresh.title}` }, client);
       return id;
     });
     return { deal: await getDeal(dealId) };
@@ -855,7 +862,13 @@ export async function toggleFavorite(userId, productId) {
     await pool.query('DELETE FROM favorites WHERE user_id=$1 AND product_id=$2', [uid, pid]);
     return false;
   }
-  await pool.query('INSERT INTO favorites (user_id, product_id, created_at) VALUES ($1,$2,$3)', [uid, pid, now()]);
+  try {
+    await pool.query('INSERT INTO favorites (user_id, product_id, created_at) VALUES ($1,$2,$3)', [uid, pid, now()]);
+  } catch (e) {
+    // Гонка: два быстрых тапа/повтор запроса — кто-то уже добавил этот же товар между SELECT и INSERT.
+    // PRIMARY KEY(user_id, product_id) откинул наш INSERT, но конечный результат тот же — считаем «добавлено».
+    if (e.code !== '23505') throw e;
+  }
   return true;
 }
 

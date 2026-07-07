@@ -1043,9 +1043,13 @@ function openChat(chatId, other) {
 }
 
 async function loadChatMessages(first) {
-  if (!chatCtx) return;
+  const ctx = chatCtx; // снимок на момент запуска запроса
+  if (!ctx) return;
   try {
-    const data = await API.get(`/chats/${chatCtx.id}/messages?sinceId=${chatCtx.lastId}`);
+    const data = await API.get(`/chats/${ctx.id}/messages?sinceId=${ctx.lastId}`);
+    // Пока ждали ответ, пользователь мог открыть другой чат (chatCtx переприсвоен на новый объект) —
+    // тогда это устаревший ответ не того чата, и применять его нельзя (испортит шапку/сообщения/курсор).
+    if (chatCtx !== ctx) return;
     if (first) {
       const sub = document.getElementById('chat-sub');
       if (sub && data.chat && data.chat.product) sub.textContent = 'по товару: ' + data.chat.product.title;
@@ -1489,9 +1493,12 @@ function debounce(fn, ms) {
   let t;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
+let refreshUnreadSeq = 0;
 async function refreshUnread() {
+  const seq = ++refreshUnreadSeq; // несколько вызовов могут идти одновременно — применяем только самый свежий ответ
   try {
     const { unread } = await API.get('/unread');
+    if (seq !== refreshUnreadSeq) return;
     if (unread > 0) { chatsBadge.textContent = unread > 99 ? '99+' : unread; chatsBadge.hidden = false; }
     else chatsBadge.hidden = true;
   } catch (e) {}

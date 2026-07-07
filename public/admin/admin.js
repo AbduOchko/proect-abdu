@@ -47,7 +47,14 @@ function userLabel(name, username, id) {
   return `${esc(name || 'Без имени')}${username ? ' · @' + esc(username) : ''} <span class="badge-id">#${id}</span>`;
 }
 function confirmDialog(msg) {
-  return new Promise((res) => { if (tg && tg.showConfirm) tg.showConfirm(msg, (ok) => res(!!ok)); else res(confirm(msg)); });
+  return new Promise((res) => {
+    // tg.showConfirm может бросить исключение (например, старая версия Telegram) —
+    // без try/catch это молча ломало бы кнопку (unhandled rejection, никакой обратной связи).
+    try {
+      if (tg && tg.showConfirm) { tg.showConfirm(msg, (ok) => res(!!ok)); return; }
+    } catch (e) {}
+    res(confirm(msg));
+  });
 }
 
 const API = {

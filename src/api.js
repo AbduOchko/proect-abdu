@@ -23,6 +23,18 @@ const numOrUndef = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
+// limit: отсутствующее/некорректное значение -> дефолт; явные 0 и отрицательные — не то же самое,
+// что "не указано" (0 || def в JS дал бы def) — всегда клэмпим в [0, max], чтобы отрицательное
+// значение не долетело до SQL LIMIT/OFFSET (Postgres иначе падает с ошибкой на весь запрос).
+const clampLimit = (v, def, max) => {
+  if (v == null || String(v).trim() === '') return def;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 0), max) : def;
+};
+const clampOffset = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(Math.floor(n), 0) : 0;
+};
 const validCat = (c) => CATEGORY_KEYS.includes(c);
 const fmtMoney = (n) => (Number(n) || 0).toLocaleString('ru-RU') + ' ₽';
 function bad(res, msg) {
@@ -111,8 +123,8 @@ api.get('/products', async (req, res) => {
     minPrice: numOrUndef(req.query.minPrice),
     maxPrice: numOrUndef(req.query.maxPrice),
     status: 'active',
-    limit: Math.min(num(req.query.limit) || 50, 100),
-    offset: num(req.query.offset),
+    limit: clampLimit(req.query.limit, 50, 100),
+    offset: clampOffset(req.query.offset),
   });
   res.json(await withFavorites(items, req.user.id));
 });
@@ -233,8 +245,8 @@ api.get('/requests', async (req, res) => {
       category: validCat(category) ? category : undefined,
       q: str(q, 100),
       status: 'active',
-      limit: Math.min(num(req.query.limit) || 50, 100),
-      offset: num(req.query.offset),
+      limit: clampLimit(req.query.limit, 50, 100),
+      offset: clampOffset(req.query.offset),
     })
   );
 });
@@ -487,7 +499,7 @@ admin.use(adminOnly);
 admin.get('/stats', async (req, res) => res.json(await db.adminStats()));
 
 admin.get('/users', async (req, res) => {
-  res.json(await db.listUsers({ q: str(req.query.q, 100), limit: Math.min(num(req.query.limit) || 100, 200), offset: num(req.query.offset) }));
+  res.json(await db.listUsers({ q: str(req.query.q, 100), limit: clampLimit(req.query.limit, 100, 200), offset: clampOffset(req.query.offset) }));
 });
 
 admin.post('/users/:id/ban', async (req, res) => {
@@ -502,7 +514,7 @@ admin.post('/users/:id/ban', async (req, res) => {
 });
 
 admin.get('/products', async (req, res) => {
-  res.json(await db.listProducts({ q: str(req.query.q, 100), status: str(req.query.status, 20) || 'all', limit: Math.min(num(req.query.limit) || 100, 200), offset: num(req.query.offset) }));
+  res.json(await db.listProducts({ q: str(req.query.q, 100), status: str(req.query.status, 20) || 'all', limit: clampLimit(req.query.limit, 100, 200), offset: clampOffset(req.query.offset) }));
 });
 
 admin.patch('/products/:id/status', async (req, res) => {
