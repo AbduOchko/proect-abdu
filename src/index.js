@@ -109,12 +109,21 @@ async function runDealTimeouts() {
     for (const e of events) {
       const d = e.deal;
       if (!d) continue;
-      if (e.type === 'auto_cancel') {
+      if (e.type === 'auto_cancel_confirm') {
         notifyUser(d.buyer_id, `⏱ Продавец не подтвердил сделку по «${escHtml(d.title)}» за 24 часа. Сделка отменена, средства возвращены на баланс.`);
         notifyUser(d.seller_id, `⏱ Вы не подтвердили сделку по «${escHtml(d.title)}» за 24 часа. Сделка отменена, рейтинг снижен.`);
+      } else if (e.type === 'auto_cancel_deliver') {
+        notifyUser(d.buyer_id, `⏱ Продавец не передал товар по «${escHtml(d.title)}» за 24 часа. Сделка отменена, средства возвращены на баланс.`);
+        notifyUser(d.seller_id, `⏱ Вы не передали товар по «${escHtml(d.title)}» за 24 часа. Сделка отменена, рейтинг снижен.`);
       } else if (e.type === 'auto_complete') {
         notifyUser(d.seller_id, `⏱ Покупатель не подтвердил получение за 7 дней — сделка по «${escHtml(d.title)}» завершена автоматически. На баланс зачислено.`);
         notifyUser(d.buyer_id, `⏱ Сделка по «${escHtml(d.title)}» автоматически завершена (7 дней на проверке истекли).`);
+      } else if (e.type === 'review_reminder') {
+        notifyUser(d.buyer_id, `⏳ Напоминание: через 24 часа сделка по «${escHtml(d.title)}» завершится автоматически, если вы не подтвердите получение или не откроете спор.`);
+      } else if (e.type === 'dispute_reminder') {
+        for (const adminId of config.adminIds) {
+          notifyUser(adminId, `⚠️ Спор по «${escHtml(d.title)}» (#${d.id}) не решён уже ${e.label}. Требуется решение администратора.`);
+        }
       }
     }
   } catch (e) {

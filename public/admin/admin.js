@@ -217,26 +217,106 @@ async function renderDeals() {
     viewEl.innerHTML = items.length ? items.map(dealItem).join('') : empty('Нет сделок');
     viewEl.querySelectorAll('.a-item').forEach((it) => {
       const id = it.dataset.id;
-      const resolve = async (outcome) => {
-        if (!(await confirmDialog(outcome === 'release' ? 'Выплатить продавцу?' : 'Вернуть деньги покупателю?'))) return;
-        await API.post(`/admin/deals/${id}/resolve`, { outcome }); toast('Готово'); renderDeals();
+      const resolve = async (outcome, extra) => {
+        try {
+          await API.post(`/admin/deals/${id}/resolve`, { outcome, ...extra });
+          toast('Готово'); renderDeals();
+        } catch (e) { toast(e.message); }
       };
-      it.querySelector('[data-act="release"]')?.addEventListener('click', () => resolve('release'));
-      it.querySelector('[data-act="refund"]')?.addEventListener('click', () => resolve('refund'));
+      it.querySelector('[data-act="release"]')?.addEventListener('click', async () => {
+        if (!(await confirmDialog('Выплатить продавцу?'))) return;
+        resolve('release');
+      });
+      it.querySelector('[data-act="refund"]')?.addEventListener('click', async () => {
+        if (!(await confirmDialog('Вернуть деньги покупателю?'))) return;
+        resolve('refund');
+      });
+      const splitRow = it.querySelector('.split-row');
+      it.querySelector('[data-act="split"]')?.addEventListener('click', () => { if (splitRow) splitRow.hidden = !splitRow.hidden; });
+      it.querySelector('[data-act="split-confirm"]')?.addEventListener('click', async () => {
+        const input = it.querySelector('.split-amount');
+        const sellerAmount = Number(input.value);
+        if (!(sellerAmount > 0)) return toast('Укажите сумму продавцу больше 0');
+        if (!(await confirmDialog(`Продавцу ${sellerAmount.toLocaleString('ru-RU')} ₽, остальное — покупателю?`))) return;
+        resolve('split', { sellerAmount });
+      });
+      const detail = it.querySelector('.a-detail');
+      it.querySelector('[data-act="details"]')?.addEventListener('click', () => { if (detail) detail.hidden = !detail.hidden; });
+      it.querySelector('[data-act="load-chat"]')?.addEventListener('click', async (ev) => {
+        const box = it.querySelector(`#a-chat-${id}`);
+        box.innerHTML = '<div class="loader"><span class="spin"></span></div>';
+        try {
+          const { messages } = await API.get(`/admin/deals/${id}/messages`);
+          const d = items.find((x) => String(x.id) === String(id));
+          box.innerHTML = messages.length ? messages.map((m) => chatMsgHtml(m, d)).join('') : empty('Сообщений нет');
+        } catch (e) { box.innerHTML = errBox(e); }
+      });
     });
   } catch (e) { viewEl.innerHTML = errBox(e); }
+}
+function chatMsgHtml(m, d) {
+  const isBuyer = d && Number(m.sender_id) === Number(d.buyer_id);
+  return `<div class="msg ${isBuyer ? 'in' : 'out'}"><b>${isBuyer ? 'Покупатель' : 'Продавец'}:</b> ${esc(m.text)}<div class="t">${dt(m.created_at)}</div></div>`;
+}
+function galleryHtml(urls) {
+  if (!urls || !urls.length) return '';
+  return `<div class="shots-edit">${urls.map((u) => `<a class="shot-thumb" href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}"></a>`).join('')}</div>`;
+}
+// Предупреждение о недобросовестном спорщике: больше одного открытого спора или хотя бы один проигранный
+function disputeBadge(opened, lost) {
+  opened = opened || 0; lost = lost || 0;
+  if (opened < 2 && lost < 1) return '';
+  return ` <span class="warn-badge" title="Споры: открыто ${opened}, проиграно ${lost}">${ic('exclamation-triangle')} ${lost}/${opened}</span>`;
+}
+function dealDetailHtml(d) {
+  const snap = d.product_snapshot || {};
+  let html = '';
+  if (snap && snap.title) {
+    html += `<div class="section-label mt12">Товар на момент покупки</div>
+      <div class="list-group">
+        <div class="ios-row"><span class="label">Название</span><span class="trailing">${esc(snap.title)}</span></div>
+        ${snap.subscribers ? `<div class="ios-row"><span class="label">Подписчики</span><span class="trailing">${Number(snap.subscribers).toLocaleString('ru-RU')}</span></div>` : ''}
+        ${snap.reach24 ? `<div class="ios-row"><span class="label">Охват 24ч</span><span class="trailing">${Number(snap.reach24).toLocaleString('ru-RU')}</span></div>` : ''}
+      </div>
+      ${snap.description ? `<p class="text-hint mt8" style="white-space:pre-wrap">${esc(snap.description)}</p>` : ''}
+      ${galleryHtml(snap.screenshots)}`;
+  }
+  if (d.delivery_proof) {
+    html += `<div class="section-label mt12">Доказательство передачи (продавец)</div>
+      <div class="list-group"><div class="ios-row" style="display:block;padding:12px 14px"><p style="margin:0 0 8px;white-space:pre-wrap">${esc(d.delivery_proof)}</p>${galleryHtml(d.delivery_proof_evidence)}</div></div>`;
+  }
+  if (d.dispute_reason) {
+    const opener = d.disputed_by ? (Number(d.disputed_by) === Number(d.buyer_id) ? 'покупатель' : 'продавец') : '';
+    html += `<div class="section-label mt12">Причина спора${opener ? ` (открыл: ${opener})` : ''}</div>
+      <div class="list-group"><div class="ios-row" style="display:block;padding:12px 14px"><p style="margin:0 0 8px;white-space:pre-wrap">${esc(d.dispute_reason)}</p>${galleryHtml(d.dispute_evidence)}</div></div>`;
+  }
+  if (d.dispute_response) {
+    html += `<div class="section-label mt12">Ответ на спор</div>
+      <div class="list-group"><div class="ios-row" style="display:block;padding:12px 14px"><p style="margin:0 0 8px;white-space:pre-wrap">${esc(d.dispute_response)}</p>${galleryHtml(d.dispute_response_evidence)}</div></div>`;
+  }
+  html += `<div class="section-label mt12">Переписка покупателя и продавца</div>
+    <div id="a-chat-${d.id}"><button class="a-btn gray" data-act="load-chat">${ic('chat-dots')} Показать переписку</button></div>`;
+  return html;
 }
 function dealItem(d) {
   const active = ACTIVE_DEAL.includes(d.status);
   return `<div class="a-item" data-id="${d.id}">
     <div class="a-item-head"><div><div class="a-item-title">${esc(d.title)} — ${money(d.amount)}</div>
-      <div class="a-item-sub">${ic('cart')} ${userLabel(d.buyer_name, d.buyer_username, d.buyer_id)}<br>${ic('cash-coin')} ${userLabel(d.seller_name, d.seller_username, d.seller_id)}<br>${dt(d.created_at)}</div></div>
+      <div class="a-item-sub">${ic('cart')} ${userLabel(d.buyer_name, d.buyer_username, d.buyer_id)}${disputeBadge(d.buyer_disputes_opened, d.buyer_disputes_lost)}<br>${ic('cash-coin')} ${userLabel(d.seller_name, d.seller_username, d.seller_id)}${disputeBadge(d.seller_disputes_opened, d.seller_disputes_lost)}<br>${dt(d.created_at)}</div></div>
       <span class="st st-${d.status}">${DEAL_STATUS[d.status] || d.status}</span>
     </div>
-    ${active ? `<div class="a-actions">
+    <div class="a-actions">
+      <button class="a-btn gray" data-act="details">${ic('info-circle')} Подробнее</button>
+      ${active ? `
       <button class="a-btn green" data-act="release">${ic('cash-coin')} Продавцу</button>
       <button class="a-btn red" data-act="refund">${ic('arrow-counterclockwise')} Покупателю</button>
+      <button class="a-btn gray" data-act="split">${ic('columns-gap')} Разделить</button>` : ''}
+    </div>
+    ${active ? `<div class="split-row" hidden>
+      <input type="number" class="split-amount" placeholder="Сумма продавцу, ₽" min="1">
+      <button class="a-btn green" data-act="split-confirm">${ic('check-lg')} Подтвердить раздел</button>
     </div>` : ''}
+    <div class="a-detail" hidden>${dealDetailHtml(d)}</div>
   </div>`;
 }
 

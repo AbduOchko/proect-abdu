@@ -177,6 +177,27 @@ async function ensureSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS registered INTEGER DEFAULT 0;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS seq_id INTEGER;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS disputes_opened INTEGER DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS disputes_lost INTEGER DEFAULT 0;
+    -- Снимок объявления на момент покупки (описание/подписчики/охват/скриншоты) — чтобы
+    -- при споре было видно, что именно было заявлено, даже если продавец потом отредактировал товар.
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS product_snapshot TEXT DEFAULT '{}';
+    -- Подтверждение передачи от продавца (нажатие «Передал») — не гарантия подлинности,
+    -- но след для админа при споре.
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS delivery_proof TEXT DEFAULT '';
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS delivery_proof_evidence TEXT DEFAULT '[]';
+    -- Причина/доказательства открывшего спор и ответ второй стороны.
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS disputed_by BIGINT;
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS dispute_reason TEXT DEFAULT '';
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS dispute_evidence TEXT DEFAULT '[]';
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS dispute_response TEXT DEFAULT '';
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS dispute_response_evidence TEXT DEFAULT '[]';
+    -- Метка «спор открыт повторно после завершения» (окно претензий) — деньги уже были
+    -- выплачены продавцу, поэтому возврат при таком споре должен списать их обратно.
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS reopened_at BIGINT DEFAULT 0;
+    -- Чтобы не слать одно и то же напоминание повторно каждую минуту фонового цикла.
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS dispute_reminder_stage INTEGER DEFAULT 0;
+    ALTER TABLE deals ADD COLUMN IF NOT EXISTS review_reminder_sent INTEGER DEFAULT 0;
   `);
   await pool.query(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_key ON users(login_key) WHERE login_key != ''`
@@ -208,6 +229,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 // Экранирует спецсимволы LIKE/ILIKE (% и _ — подстановочные знаки, \ — сам символ экранирования)
 // в пользовательском поисковом запросе, иначе, например, поиск по "_" вёл бы себя как "любой символ".
 const escLike = (s) => String(s).replace(/[\\%_]/g, '\\$&');
+const str1000 = (s) => String(s ?? '').slice(0, 1000);
 
 // Тайминги сделок (эскроу)
 export const DEAL_MS = {
@@ -215,6 +237,16 @@ export const DEAL_MS = {
   deliver: 24 * 60 * 60 * 1000, // продавцу на передачу товара
   review: 7 * 24 * 60 * 60 * 1000, // покупателю на проверку -> автозавершение
 };
+// Окно претензий: сколько после «Завершена» ещё можно открыть спор повторно
+const CLAIM_WINDOW_MS = 72 * 60 * 60 * 1000;
+// Напоминание покупателю о скорой автозавершении «на проверке»
+const REVIEW_REMINDER_BEFORE_MS = 24 * 60 * 60 * 1000;
+// Пороги эскалации напоминаний админам по зависшим спорам
+const DISPUTE_REMINDER_STAGES = [
+  { stage: 1, afterMs: 24 * 60 * 60 * 1000, label: '24 часа' },
+  { stage: 2, afterMs: 72 * 60 * 60 * 1000, label: '72 часа' },
+  { stage: 3, afterMs: 7 * 24 * 60 * 60 * 1000, label: '7 дней' },
+];
 
 // Разворачивает JSON-поля товара в массивы
 function hydrateProduct(p) {
@@ -620,6 +652,10 @@ const dealSelect = `
 function enrichDeal(d) {
   if (!d) return d;
   d.overdue = ['created', 'in_progress', 'review'].includes(d.status) && d.deadline_at > 0 && now() > Number(d.deadline_at);
+  try { d.product_snapshot = JSON.parse(d.product_snapshot || '{}'); } catch { d.product_snapshot = {}; }
+  try { d.delivery_proof_evidence = JSON.parse(d.delivery_proof_evidence || '[]'); } catch { d.delivery_proof_evidence = []; }
+  try { d.dispute_evidence = JSON.parse(d.dispute_evidence || '[]'); } catch { d.dispute_evidence = []; }
+  try { d.dispute_response_evidence = JSON.parse(d.dispute_response_evidence || '[]'); } catch { d.dispute_response_evidence = []; }
   return d;
 }
 
@@ -654,10 +690,19 @@ export async function createEscrowDeal(product, buyerId) {
       const fresh = reserve.rows[0];
       const price = round2(fresh.price);
       if (!price || price <= 0) throw new DealError('unavailable'); // цену успели сделать договорной/нулевой
+      // Снимок объявления на момент покупки — при споре админ увидит, что именно было
+      // заявлено, даже если продавец потом отредактирует или удалит товар.
+      const snapshot = {
+        title: fresh.title, category: fresh.category, description: fresh.description,
+        price, avatar: fresh.avatar, subscribers: fresh.subscribers, reach24: fresh.reach24,
+        avg_age: fresh.avg_age,
+        genres: (() => { try { return JSON.parse(fresh.genres || '[]'); } catch { return []; } })(),
+        screenshots: (() => { try { return JSON.parse(fresh.screenshots || '[]'); } catch { return []; } })(),
+      };
       const ins = await client.query(
-        `INSERT INTO deals (product_id, title, category, buyer_id, seller_id, amount, status, created_at, updated_at, deadline_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9) RETURNING id`,
-        [fresh.id, fresh.title, fresh.category, buyer, Number(fresh.seller_id), price, now(), now(), now() + DEAL_MS.confirm]
+        `INSERT INTO deals (product_id, title, category, buyer_id, seller_id, amount, status, created_at, updated_at, deadline_at, product_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9,$10) RETURNING id`,
+        [fresh.id, fresh.title, fresh.category, buyer, Number(fresh.seller_id), price, now(), now(), now() + DEAL_MS.confirm, JSON.stringify(snapshot)]
       );
       const id = ins.rows[0].id;
       await balanceTx(buyer, -price, 'hold', { dealId: id, note: `Оплата сделки #${id}: ${fresh.title}` }, client);
@@ -685,10 +730,12 @@ export async function sellerConfirmDeal(id) {
 // Продавец передал -> На проверке (7 дней до автозавершения)
 // Тот же CAS-принцип: WHERE status='in_progress', иначе спор, открытый в этот момент,
 // можно было бы молча вернуть в 'review' и позже автозавершить в обход решения администратора.
-export async function sellerDeliverDeal(id) {
+export async function sellerDeliverDeal(id, { proof = '', evidence = [] } = {}) {
   const upd = await pool.query(
-    "UPDATE deals SET status='review', deadline_at=$1, updated_at=$2 WHERE id=$3 AND status='in_progress' RETURNING id",
-    [now() + DEAL_MS.review, now(), Number(id)]
+    `UPDATE deals SET status='review', deadline_at=$1, updated_at=$2,
+       delivery_proof=$3, delivery_proof_evidence=$4
+     WHERE id=$5 AND status='in_progress' RETURNING id`,
+    [now() + DEAL_MS.review, now(), proof, JSON.stringify(evidence.slice(0, 8)), Number(id)]
   );
   return { applied: upd.rowCount > 0, deal: await getDeal(id) };
 }
@@ -738,20 +785,118 @@ export async function cancelDeal(id, { penalizeSeller = false, note = '', allowF
   });
 }
 
-export async function disputeDeal(id) {
+// Открытие спора. Помимо активных статусов, разрешаем повторно открыть спор по уже
+// «Завершённой» сделке в течение окна претензий (CLAIM_WINDOW_MS) — например, если продавец
+// саботировал/отобрал актив уже после выплаты. reason/evidence — обязательный след для админа.
+export async function disputeDeal(id, userId, { reason = '', evidence = [] } = {}) {
+  const t = now();
+  const uid = Number(userId);
   const r = await pool.query(
-    `UPDATE deals SET status='disputed', updated_at=$1 WHERE id=$2 AND status IN ('created','in_progress','review') RETURNING id`,
-    [now(), Number(id)]
+    `UPDATE deals SET status='disputed', updated_at=$1, disputed_by=$2, dispute_reason=$3, dispute_evidence=$4,
+       reopened_at = CASE WHEN status='completed' THEN $1 ELSE reopened_at END,
+       dispute_reminder_stage=0
+     WHERE id=$5 AND (
+       status IN ('created','in_progress','review')
+       OR (status='completed' AND updated_at > $6)
+     )
+     RETURNING id`,
+    [t, uid, str1000(reason), JSON.stringify((evidence || []).slice(0, 8)), Number(id), t - CLAIM_WINDOW_MS]
+  );
+  if (r.rowCount === 0) throw new DealError('invalid_state');
+  await pool.query('UPDATE users SET disputes_opened = disputes_opened + 1 WHERE id=$1', [uid]);
+  return getDeal(id);
+}
+
+// Ответ второй стороны на спор (не открывавшей его) — своя причина/доказательства.
+export async function respondToDispute(id, userId, { response = '', evidence = [] } = {}) {
+  const r = await pool.query(
+    `UPDATE deals SET dispute_response=$1, dispute_response_evidence=$2
+     WHERE id=$3 AND status='disputed' AND disputed_by IS DISTINCT FROM $4 RETURNING id`,
+    [str1000(response), JSON.stringify((evidence || []).slice(0, 8)), Number(id), Number(userId)]
   );
   if (r.rowCount === 0) throw new DealError('invalid_state');
   return getDeal(id);
 }
 
-// Решение спора админом: 'release' — продавцу, 'refund' — покупателю.
-// allowFromDisputed:true — единственный легитимный способ закрыть сделку из статуса 'disputed'.
-export async function resolveDispute(id, outcome) {
-  if (outcome === 'release') return completeDeal(id, { allowFromDisputed: true });
-  return cancelDeal(id, { allowFromDisputed: true, note: `Спор решён в пользу покупателя (#${id})` });
+// Учитывает результат спора в счётчиках стороны, которая его открыла (для предупреждений
+// админу о недобросовестных спорщиках) — только для чистых release/refund, не для split.
+async function tallyDisputeOutcome(d, outcome, executor = pool) {
+  if (!d || !d.disputed_by) return;
+  const disputerLost = (outcome === 'release' && Number(d.disputed_by) === Number(d.buyer_id)) ||
+    (outcome === 'refund' && Number(d.disputed_by) === Number(d.seller_id));
+  if (disputerLost) await executor.query('UPDATE users SET disputes_lost = disputes_lost + 1 WHERE id=$1', [Number(d.disputed_by)]);
+}
+
+// Частичное разрешение спора (обычный, ещё не завершённый путь): sellerAmount — продавцу,
+// остаток — покупателю, одной атомарной операцией.
+export async function splitDeal(id, sellerAmount) {
+  return withTransaction(async (client) => {
+    const upd = await client.query(
+      `UPDATE deals SET status='completed', deadline_at=0, updated_at=$1
+       WHERE id=$2 AND status NOT IN ('completed','cancelled') RETURNING *`,
+      [now(), Number(id)]
+    );
+    if (upd.rowCount === 0) return { applied: false, deal: await getDeal(id, client) };
+    const d = upd.rows[0];
+    const toSeller = round2(Math.max(0, Math.min(Number(sellerAmount) || 0, d.amount)));
+    const toBuyer = round2(d.amount - toSeller);
+    if (toSeller > 0) await balanceTx(d.seller_id, toSeller, 'release', { dealId: d.id, note: `Частичная выплата по спору #${d.id}` }, client);
+    if (toBuyer > 0) await balanceTx(d.buyer_id, toBuyer, 'refund', { dealId: d.id, note: `Частичный возврат по спору #${d.id}` }, client);
+    await client.query('UPDATE users SET deals_count = deals_count + 1 WHERE id IN ($1,$2)', [d.buyer_id, d.seller_id]);
+    if (d.product_id) await client.query("UPDATE products SET status='sold' WHERE id=$1", [d.product_id]);
+    return { applied: true, deal: await getDeal(id, client) };
+  });
+}
+
+// Разворот уже завершённой (и оплаченной) сделки — только для спора, повторно открытого
+// в окне претензий. sellerAmount — сколько продавец оставляет себе (0 — полный возврат);
+// разницу списываем с его баланса и возвращаем покупателю. Если баланса не хватает
+// (например, уже вывёл) — дальше это вне возможностей софта, только вручную.
+export async function reverseCompletedDeal(id, sellerAmount = 0) {
+  return withTransaction(async (client) => {
+    const check = await client.query(`SELECT * FROM deals WHERE id=$1 AND status='disputed' AND reopened_at > 0`, [Number(id)]);
+    if (!check.rows[0]) return { applied: false, deal: await getDeal(id, client) };
+    const d = check.rows[0];
+    const keep = round2(Math.max(0, Math.min(Number(sellerAmount) || 0, d.amount)));
+    const clawback = round2(d.amount - keep);
+    if (clawback > 0) {
+      try {
+        await balanceTx(d.seller_id, -clawback, 'refund', { dealId: d.id, note: `Возврат по претензии после завершения сделки #${d.id}` }, client);
+      } catch (e) {
+        if (e.code === 'insufficient_funds') throw new DealError('seller_insufficient_funds');
+        throw e;
+      }
+      await balanceTx(d.buyer_id, clawback, 'refund', { dealId: d.id, note: `Возврат по претензии после завершения сделки #${d.id}` }, client);
+    }
+    await client.query(`UPDATE deals SET status='completed', updated_at=$1 WHERE id=$2`, [now(), d.id]);
+    return { applied: true, deal: await getDeal(id, client) };
+  });
+}
+
+// Решение спора админом: 'release' — продавцу, 'refund' — покупателю, 'split' — раздел
+// (sellerAmount продавцу, остаток покупателю). Если спор открыт повторно после «Завершена»
+// (reopened_at>0), деньги уже у продавца — используем разворот с изъятием вместо обычной отмены.
+export async function resolveDispute(id, outcome, { sellerAmount } = {}) {
+  const d = await getDeal(id);
+  if (!d) throw new DealError('invalid_state');
+  const wasReopened = Number(d.reopened_at) > 0;
+  let result;
+  if (wasReopened) {
+    if (outcome === 'release') {
+      const upd = await pool.query(`UPDATE deals SET status='completed', updated_at=$1 WHERE id=$2 AND status='disputed' RETURNING id`, [now(), Number(id)]);
+      result = { applied: upd.rowCount > 0, deal: await getDeal(id) };
+    } else {
+      result = await reverseCompletedDeal(id, outcome === 'split' ? sellerAmount : 0);
+    }
+  } else if (outcome === 'split') {
+    result = await splitDeal(id, sellerAmount);
+  } else if (outcome === 'release') {
+    result = await completeDeal(id, { allowFromDisputed: true });
+  } else {
+    result = await cancelDeal(id, { allowFromDisputed: true, note: `Спор решён в пользу покупателя (#${id})` });
+  }
+  if (result.applied && (outcome === 'release' || outcome === 'refund')) await tallyDisputeOutcome(d, outcome);
+  return result;
 }
 
 // Фоновая обработка дедлайнов. Возвращает список событий для уведомлений — только для
@@ -765,7 +910,16 @@ export async function processDealTimeouts() {
   );
   for (const r of overdueCreated.rows) {
     const { applied, deal } = await cancelDeal(r.id, { penalizeSeller: true, note: 'Продавец не подтвердил сделку вовремя' });
-    if (applied) events.push({ type: 'auto_cancel', deal });
+    if (applied) events.push({ type: 'auto_cancel_confirm', deal });
+  }
+  // Продавец подтвердил, но так и не передал товар в течение 24ч — раньше это состояние
+  // не проверялось вообще, и деньги покупателя зависали в эскроу бессрочно.
+  const overdueInProgress = await pool.query(
+    "SELECT id FROM deals WHERE status='in_progress' AND deadline_at>0 AND deadline_at < $1", [t]
+  );
+  for (const r of overdueInProgress.rows) {
+    const { applied, deal } = await cancelDeal(r.id, { penalizeSeller: true, note: 'Продавец не передал товар вовремя' });
+    if (applied) events.push({ type: 'auto_cancel_deliver', deal });
   }
   const overdueReview = await pool.query(
     "SELECT id FROM deals WHERE status='review' AND deadline_at>0 AND deadline_at < $1", [t]
@@ -773,6 +927,34 @@ export async function processDealTimeouts() {
   for (const r of overdueReview.rows) {
     const { applied, deal } = await completeDeal(r.id, {});
     if (applied) events.push({ type: 'auto_complete', deal });
+  }
+  // Напоминание покупателю за 24ч до автозавершения «на проверке» — чтобы не терять
+  // окно проверки/спора просто по забывчивости.
+  const soonReview = await pool.query(
+    `SELECT id FROM deals WHERE status='review' AND deadline_at>0
+     AND deadline_at < $1 AND deadline_at >= $2 AND review_reminder_sent=0`,
+    [t + REVIEW_REMINDER_BEFORE_MS, t]
+  );
+  for (const r of soonReview.rows) {
+    const upd = await pool.query(
+      "UPDATE deals SET review_reminder_sent=1 WHERE id=$1 AND review_reminder_sent=0 RETURNING id",
+      [r.id]
+    );
+    if (upd.rowCount > 0) events.push({ type: 'review_reminder', deal: await getDeal(r.id) });
+  }
+  // Эскалация напоминаний админам по зависшим спорам (24ч / 72ч / 7 дней без решения).
+  for (const s of DISPUTE_REMINDER_STAGES) {
+    const stale = await pool.query(
+      `SELECT id FROM deals WHERE status='disputed' AND updated_at < $1 AND dispute_reminder_stage < $2`,
+      [t - s.afterMs, s.stage]
+    );
+    for (const r of stale.rows) {
+      const upd = await pool.query(
+        'UPDATE deals SET dispute_reminder_stage=$1 WHERE id=$2 AND dispute_reminder_stage < $1 RETURNING id',
+        [s.stage, r.id]
+      );
+      if (upd.rowCount > 0) events.push({ type: 'dispute_reminder', deal: await getDeal(r.id), label: s.label });
+    }
   }
   return events;
 }
@@ -936,10 +1118,12 @@ export async function adminStats() {
 export async function listAllDeals(limit = 200) {
   const r = await pool.query(
     `SELECT d.*, b.first_name AS buyer_name, b.username AS buyer_username,
-            s.first_name AS seller_name, s.username AS seller_username
+            b.disputes_opened AS buyer_disputes_opened, b.disputes_lost AS buyer_disputes_lost,
+            s.first_name AS seller_name, s.username AS seller_username,
+            s.disputes_opened AS seller_disputes_opened, s.disputes_lost AS seller_disputes_lost
      FROM deals d JOIN users b ON b.id=d.buyer_id JOIN users s ON s.id=d.seller_id
      ORDER BY d.created_at DESC LIMIT $1`,
     [limit]
   );
-  return r.rows;
+  return r.rows.map(enrichDeal);
 }

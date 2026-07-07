@@ -420,7 +420,13 @@ api.post('/deals/:id/deliver', async (req, res) => {
   const { d, role } = ld;
   if (role !== 'seller') return res.status(403).json({ error: 'forbidden', message: 'Только продавец' });
   if (d.status !== 'in_progress') return bad(res, 'Сейчас нельзя передать на проверку');
-  const { applied, deal: updated } = await db.sellerDeliverDeal(d.id);
+  // Не доказательство подлинности, но обязательный след: что именно и как продавец передал —
+  // пригодится админу, если дело дойдёт до спора.
+  const proof = str(req.body.proof, 1000);
+  const evidence = Array.isArray(req.body.evidence)
+    ? req.body.evidence.filter((u) => typeof u === 'string' && u.startsWith('/uploads/')).slice(0, 8) : [];
+  if (proof.length < 10) return bad(res, 'Опишите, что и как вы передали покупателю (минимум 10 символов)');
+  const { applied, deal: updated } = await db.sellerDeliverDeal(d.id, { proof, evidence });
   if (!applied) return bad(res, 'Сейчас нельзя передать на проверку');
   notifyUser(d.buyer_id, `📦 Продавец передал товар по «${escHtml(d.title)}». Проверьте и нажмите «Подтвердить получение». Через <b>7 дней</b> сделка завершится автоматически.`);
   res.json(updated);
@@ -469,18 +475,45 @@ api.post('/deals/:id/cancel', async (req, res) => {
   res.json(updated);
 });
 
-// Открыть спор
+// Открыть спор — причина обязательна, доказательства (скриншоты) опциональны.
+// Можно открыть и повторно по уже «Завершённой» сделке в течение окна претензий (72ч) —
+// db.disputeDeal сам решит, попадает ли сделка в это окно.
 api.post('/deals/:id/dispute', async (req, res) => {
   const ld = await loadDeal(req, res); if (!ld) return;
   const { d, role } = ld;
-  if (!['created', 'in_progress', 'review'].includes(d.status)) return bad(res, 'Спор сейчас открыть нельзя');
+  if (!['created', 'in_progress', 'review', 'completed'].includes(d.status)) return bad(res, 'Спор сейчас открыть нельзя');
+  const reason = str(req.body.reason, 1000);
+  const evidence = Array.isArray(req.body.evidence)
+    ? req.body.evidence.filter((u) => typeof u === 'string' && u.startsWith('/uploads/')).slice(0, 8) : [];
+  if (reason.length < 10) return bad(res, 'Опишите причину спора (минимум 10 символов)');
   try {
-    const updated = await db.disputeDeal(d.id);
+    const updated = await db.disputeDeal(d.id, req.user.id, { reason, evidence });
     const other = role === 'buyer' ? d.seller_id : d.buyer_id;
     notifyUser(other, `⚠️ По сделке «${escHtml(d.title)}» открыт спор. Решение примет администратор.`);
+    for (const adminId of config.adminIds) notifyUser(adminId, `⚠️ Новый спор по сделке #${d.id} «${escHtml(d.title)}».`);
     res.json(updated);
   } catch (e) {
-    if (e.code === 'invalid_state') return bad(res, 'Спор сейчас открыть нельзя');
+    if (e.code === 'invalid_state') {
+      return bad(res, d.status === 'completed' ? 'Окно для повторной претензии истекло (72 часа после завершения)' : 'Спор сейчас открыть нельзя');
+    }
+    throw e;
+  }
+});
+
+// Ответ второй стороны на спор — своя причина/доказательства для админа.
+api.post('/deals/:id/dispute/respond', async (req, res) => {
+  const ld = await loadDeal(req, res); if (!ld) return;
+  const { d } = ld;
+  if (d.status !== 'disputed') return bad(res, 'По этой сделке сейчас нет открытого спора');
+  const response = str(req.body.response, 1000);
+  const evidence = Array.isArray(req.body.evidence)
+    ? req.body.evidence.filter((u) => typeof u === 'string' && u.startsWith('/uploads/')).slice(0, 8) : [];
+  if (response.length < 10) return bad(res, 'Опишите ваш ответ на спор (минимум 10 символов)');
+  try {
+    const updated = await db.respondToDispute(d.id, req.user.id, { response, evidence });
+    res.json(updated);
+  } catch (e) {
+    if (e.code === 'invalid_state') return bad(res, 'Вы не можете ответить на этот спор');
     throw e;
   }
 });
@@ -569,17 +602,38 @@ admin.get('/deals', async (req, res) => {
 
 // Решение спора / принудительное закрытие сделки админом
 admin.post('/deals/:id/resolve', async (req, res) => {
-  const outcome = str(req.body.outcome, 20); // 'release' -> продавцу, 'refund' -> покупателю
-  if (!['release', 'refund'].includes(outcome)) return bad(res, 'Некорректное решение');
+  const outcome = str(req.body.outcome, 20); // 'release' -> продавцу, 'refund' -> покупателю, 'split' -> раздел
+  if (!['release', 'refund', 'split'].includes(outcome)) return bad(res, 'Некорректное решение');
   const d = await db.getDeal(req.params.id);
   if (!d) return res.status(404).json({ error: 'not_found' });
   if (!['disputed', 'created', 'in_progress', 'review'].includes(d.status)) return bad(res, 'Сделка уже закрыта');
-  const { applied, deal: updated } = await db.resolveDispute(d.id, outcome);
-  if (!applied) return bad(res, 'Сделка уже была закрыта другим способом');
-  const msg = outcome === 'release' ? 'в пользу продавца (выплата)' : 'возврат покупателю';
-  notifyUser(d.buyer_id, `⚖️ Спор по «${escHtml(d.title)}» решён: ${msg}.`);
-  notifyUser(d.seller_id, `⚖️ Спор по «${escHtml(d.title)}» решён: ${msg}.`);
-  res.json(updated);
+  let sellerAmount;
+  if (outcome === 'split') {
+    sellerAmount = num(req.body.sellerAmount);
+    if (!(sellerAmount > 0) || sellerAmount >= d.amount) return bad(res, 'Укажите сумму продавцу больше 0 и меньше полной суммы сделки');
+  }
+  try {
+    const { applied, deal: updated } = await db.resolveDispute(d.id, outcome, { sellerAmount });
+    if (!applied) return bad(res, 'Сделка уже была закрыта другим способом');
+    const msg = outcome === 'release' ? 'в пользу продавца (выплата)' : outcome === 'split' ? 'сумма разделена между сторонами' : 'возврат покупателю';
+    notifyUser(d.buyer_id, `⚖️ Спор по «${escHtml(d.title)}» решён: ${msg}.`);
+    notifyUser(d.seller_id, `⚖️ Спор по «${escHtml(d.title)}» решён: ${msg}.`);
+    res.json(updated);
+  } catch (e) {
+    if (e.code === 'seller_insufficient_funds') {
+      return bad(res, 'У продавца недостаточно средств на балансе для списания (возможно, уже вывёл) — решить можно только вручную вне приложения');
+    }
+    throw e;
+  }
+});
+
+// Переписка покупателя и продавца по сделке — для разбора спора
+admin.get('/deals/:id/messages', async (req, res) => {
+  const d = await db.getDeal(req.params.id);
+  if (!d) return res.status(404).json({ error: 'not_found' });
+  const chat = await db.getOrCreateChat(d.buyer_id, d.seller_id, d.product_id || 0);
+  const messages = await db.listMessages(chat.id, 0);
+  res.json({ chat_id: chat.id, messages });
 });
 
 // Заявки на вывод
